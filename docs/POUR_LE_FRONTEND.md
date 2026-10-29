@@ -26,7 +26,7 @@ Dans les exemples, `meta` est omis : il est toujours présent.
 ## 0. Adresse de l'API
 
 ```
-# .env.local du frontend (téléphone sur le même Wi-Fi que le PC)
+# .env.local du FRONTEND (Expo) ; le backend, lui, n'utilise plus de .env
 EXPO_PUBLIC_API_URL=http://192.168.100.175:8000
 ```
 
@@ -43,7 +43,7 @@ utiliser `http://10.0.2.2:8000`.
 | Erreurs de saisie | — | `422 VALIDATION_ERROR` avec `error.fields` : `{ "email": "Cette adresse email ne semble pas valide." }` |
 | Erreurs avec données | — | certaines erreurs ajoutent des clés à `error` : `remaining_attempts`, `retry_after`, `unavailable_product_ids` |
 | Téléphones | exemples `+22997000000` | le Bénin est passé à 10 chiffres : le serveur **normalise** `97000000`, `0197000000` et `+22997000000` en `+2290197000000` |
-| CORS (Expo web) | — | origines autorisées : `CORS_ORIGINS` du `.env` (`http://localhost:8081`, `http://localhost:19006`) ; en-têtes `Authorization`, `Content-Type`, `If-None-Match` ; `ETag` exposé |
+| CORS (Expo web) | — | origines autorisées : `cors_origins` de `config/config.local.php` (`http://localhost:8081`, `http://localhost:19006`) ; en-têtes `Authorization`, `Content-Type`, `If-None-Match`, `Idempotency-Key` ; `ETag` et `Idempotent-Replayed` exposés |
 | Identifiants supplémentaires | — | `usr_`, `org_`, `ref_`, `pt_`, `cmp_`, `spn_`, `off_`, `dos_`, `vis_` |
 
 ## 2. Authentification par email : remplace la section 10
@@ -274,12 +274,49 @@ Sans corps. Réponse : `{ "logged_out": true }`. Le jeton est révoqué.
 
 Pas encore de transcription : `503 VOICE_SEARCH_UNAVAILABLE`, « La recherche vocale arrive bientôt. Tapez votre recherche pour l'instant. »
 
-### `POST /v1/orders` et `GET /v1/orders/{id}`
+### `POST /v1/orders` : paiement sans double débit (IMPORTANT)
 
+**Envoyer l'en-tête `Idempotency-Key`**, une clé au hasard (8 à 64 caractères `A-Z a-z 0-9 - _`).
+Elle est générée **une fois par tentative de paiement**, gardée tant que la commande n'est pas
+confirmée, et renvoyée à l'identique à chaque nouvel essai : coupure réseau, délai dépassé, double appui,
+application relancée. Le serveur renvoie alors la **même** commande, et le client n'est **jamais** débité deux fois.
+
+```ts
+// panier.tsx : une clé par tentative ; on la garde jusqu'au succès (et dans AsyncStorage si l'appli peut être tuée)
+const keyRef = useRef<string | null>(null);
+const pay = () => {
+  keyRef.current ??= `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  createOrder.mutate({ body, idempotencyKey: keyRef.current }, { onSuccess: () => { keyRef.current = null; } });
+};
+// endpoints.ts : apiSend doit accepter des en-têtes supplémentaires
+createOrder: (body, key) => apiSend<Order>('POST', '/v1/orders', body, { 'Idempotency-Key': key }),
+```
+
+La clé peut aussi être envoyée dans le corps (`"idempotency_key": "…"`). Le serveur répond ainsi :
+
+| Cas | Réponse |
+|---|---|
+| Première fois | `201`, la commande en `awaiting_payment` |
+| Même clé, même panier (nouvel essai) | `200`, **la même commande**, en-tête `Idempotent-Replayed: true` |
+| Même clé, panier différent | `422 IDEMPOTENCY_KEY_REUSED` : générer une nouvelle clé |
+| Sans clé, même panier en moins de 15 min | `200`, la commande déjà créée (protection contre le double appui) |
+| Deux envois exactement simultanés | un seul crée la commande, l'autre attend puis reçoit la même (`409 REQUEST_IN_PROGRESS` après 15 s d'attente) |
+| Prestataire injoignable (coupure) | `201`, la commande est gardée et rien n'est débité. `payment_instructions` vaut « La demande de paiement n'a pas pu partir. Réessayez : vous ne serez débité qu'une seule fois. » : renvoyer la même requête avec la même clé |
+
+Conseil : désactiver le bouton « Payer » pendant `createOrder.isPending`.
+
+Autres règles :
 - `reception.detail` pour `axi_point` = l'identifiant `pt_1` reçu dans `axi_points` du devis.
 - `422 PRODUCT_UNAVAILABLE` ajoute `error.unavailable_product_ids`.
-- Paiement : en local, le prestataire est **factice**. La commande passe à `paid` dès le premier `GET /v1/orders/{id}`. Sans prestataire configuré : `503 PAYMENT_UNAVAILABLE`.
+- En local, le prestataire est **factice** : la commande passe à `paid` dès le premier `GET /v1/orders/{id}`. Sans prestataire configuré : `503 PAYMENT_UNAVAILABLE`.
 - `GET /v1/orders/{id}` d'une commande d'un autre client : `404 ORDER_NOT_FOUND`.
+
+### `POST /v1/orders/{id}/confirm-receipt` (nouveau, client connecté)
+
+Bouton « J'ai reçu ma commande » sur le suivi de commande. L'argent gardé par Axi est alors libéré aux commerçants.
+Si le client ne confirme pas, l'argent est libéré automatiquement 7 jours après la remise au coursier.
+Sans corps. Réponse : l'objet `Order` avec `status: "delivered"` (« Commande reçue »). Un nouvel appel ne libère rien de plus.
+Commande non payée : `409 ORDER_NOT_PAID`.
 
 ### `POST /v1/merchant/products` (multipart)
 
@@ -429,6 +466,16 @@ Toute modification par un agent renouvelle la vérification.
 
 Même format que `POST /v1/merchant/products`. `{id}` = `stl_…`. Réponse `201` : le `Product`.
 
+### `POST /v1/admin/orders/{id}/pickup`
+
+L'agent ou le coursier a récupéré la part d'un étal (collecte dans les allées). Corps : `{ "stall_id": "stl_1" }`.
+Sans `stall_id`, toutes les parts « prêtes » de la commande sont marquées récupérées.
+Quand toutes les parts sont récupérées, la commande passe à `on_the_way`.
+
+```json
+{ "ok": true, "data": { "status": "on_the_way", "picked_up": 1 } }
+```
+
 ## 6. Axi Pro : précisions
 
 - **Seuil d'anonymat : 5 étals.**
@@ -451,9 +498,9 @@ Même format que `POST /v1/merchant/products`. `{id}` = `stl_…`. Réponse `201
 | 403 | `FORBIDDEN` | rôle ou organisation insuffisant |
 | 403 | `EMAIL_NOT_VERIFIED`, `ACCOUNT_SUSPENDED` | connexion |
 | 404 | `NOT_FOUND`, `STALL_NOT_FOUND`, `AISLE_NOT_FOUND`, `PRODUCT_NOT_FOUND`, `ORDER_NOT_FOUND`, `CLIENT_NOT_FOUND`, `USER_NOT_FOUND`, `MERCHANT_NOT_FOUND` | |
-| 409 | `EMAIL_TAKEN`, `PHONE_TAKEN`, `CLIENT_EXISTS`, `ALREADY_MERCHANT`, `ROLE_CONFLICT`, `CREDIT_REQUEST_PENDING`, `ORDER_NOT_PREPARABLE` | |
+| 409 | `EMAIL_TAKEN`, `PHONE_TAKEN`, `CLIENT_EXISTS`, `ALREADY_MERCHANT`, `ROLE_CONFLICT`, `CREDIT_REQUEST_PENDING`, `ORDER_NOT_PREPARABLE`, `ORDER_NOT_PAID`, `REQUEST_IN_PROGRESS` | |
 | 413 | `FILE_TOO_LARGE` | photo > 8 Mo, audio > 3 Mo |
-| 422 | `VALIDATION_ERROR` (+ `fields`), `CODE_INVALID` (+ `remaining_attempts`), `CODE_EXPIRED`, `INVALID_PHONE`, `RECEPTION_DETAIL_REQUIRED`, `PRODUCT_UNAVAILABLE` (+ `unavailable_product_ids`), `DATA_SHARING_REQUIRED`, `INVALID_AUDIENCE`, `BUDGET_TOO_LOW`, `INVALID_PHOTO`, `INVALID_AUDIO`, `ORGANIZATION_REQUIRED` | |
+| 422 | `VALIDATION_ERROR` (+ `fields`), `CODE_INVALID` (+ `remaining_attempts`), `CODE_EXPIRED`, `INVALID_PHONE`, `RECEPTION_DETAIL_REQUIRED`, `PRODUCT_UNAVAILABLE` (+ `unavailable_product_ids`), `DATA_SHARING_REQUIRED`, `INVALID_AUDIENCE`, `BUDGET_TOO_LOW`, `INVALID_PHOTO`, `INVALID_AUDIO`, `ORGANIZATION_REQUIRED`, `IDEMPOTENCY_KEY_REUSED` | |
 | 429 | `TOO_MANY_REQUESTS` (+ `retry_after`), `TOO_MANY_ATTEMPTS` | |
 | 500 | `SERVER_ERROR` | |
 | 503 | `PAYMENT_UNAVAILABLE`, `VOICE_SEARCH_UNAVAILABLE`, `NO_CREDIT_PARTNER` | |
