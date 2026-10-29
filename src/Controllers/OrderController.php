@@ -136,7 +136,8 @@ final class OrderController
             $this->confirmationEmail($orderId);
         }
         Escrow::ensureInitiated($paymentId);
-        Response::ok($this->present($orderId, true), $replayed ? 200 : 201);
+        // Pas de vérification ici : le client n'a pas encore pu payer (il ouvre la page de paiement ensuite)
+        Response::ok($this->present($orderId, false), $replayed ? 200 : 201);
     }
 
     public function index(Request $req): never
