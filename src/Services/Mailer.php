@@ -34,7 +34,7 @@ final class Mailer
             $mail->SMTPSecure = $config['encryption'] === 'ssl' ? PHPMailer::ENCRYPTION_SMTPS : PHPMailer::ENCRYPTION_STARTTLS;
             $mail->Timeout = 15;
             $mail->CharSet = PHPMailer::CHARSET_UTF8;
-            $mail->setFrom($config['username'], $config['from_name']);
+            $mail->setFrom($config['from_address'] ?: $config['username'], $config['from_name']);
             $mail->addAddress($to);
             $mail->Subject = $subject;
             $mail->isHTML(true);
