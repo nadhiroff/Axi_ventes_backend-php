@@ -29,6 +29,9 @@ final class Users
             $organization = $org === null ? null : ['id' => Ids::encode('org', $org['id']), 'name' => $org['name'], 'type' => $org['type']];
         }
         $stall = $u['role'] === 'merchant' ? Database::one('SELECT id, merchant_type, verified_at FROM stalls WHERE user_id = ?', [$u['id']]) : null;
+        $application = $u['role'] === 'client'
+            ? Database::one('SELECT id, status, reject_reason, created_at FROM merchant_applications WHERE user_id = ? ORDER BY id DESC LIMIT 1', [$u['id']])
+            : null;
         return [
             'id' => Ids::encode('usr', $u['id']),
             'first_name' => $u['first_name'],
@@ -37,6 +40,8 @@ final class Users
             'email' => $u['email'],
             'email_verified' => $u['email_verified_at'] !== null,
             'phone' => $u['phone'],
+            'avatar' => Stalls::image($u['avatar_path'] ?? null, 600, 600),
+            'avatar_visibility' => $u['avatar_visibility'] ?? 'everyone',
             'role' => $u['role'],
             'lang' => $u['lang'],
             'organization' => $organization,
@@ -46,7 +51,30 @@ final class Users
                 'merchant_type' => $stall['merchant_type'] ?? null,
                 'verified' => ($stall['verified_at'] ?? null) !== null,
             ] : null,
+            // Demande « Devenir commerçant » du client (null s'il n'en a jamais envoyé)
+            'merchant_application' => $application === null ? null : [
+                'id' => Ids::encode('dem', $application['id']),
+                'status' => $application['status'],
+                'reject_reason' => $application['reject_reason'],
+                'created_at' => \Axi\Core\Clock::iso($application['created_at']),
+            ],
+            // Félicitations à afficher une seule fois après la validation par un agent
+            'merchant_welcome' => (bool) ($u['merchant_welcome_pending'] ?? false),
         ];
+    }
+
+    /**
+     * Photo de profil vue par quelqu'un d'autre, selon le choix de la personne : tout le monde, ses contacts
+     * (conversation ouverte avec elle) ou personne.
+     */
+    public static function avatarFor(array $u, ?int $viewerId, bool $isContact): ?array
+    {
+        $visible = match ($u['avatar_visibility'] ?? 'everyone') {
+            'everyone' => true,
+            'contacts' => $isContact || $viewerId === (int) $u['id'],
+            default => $viewerId === (int) $u['id'],
+        };
+        return $visible ? Stalls::image($u['avatar_path'] ?? null, 600, 600) : null;
     }
 
     public static function presentById(int $id): array

@@ -28,7 +28,8 @@ final class AuthController
         'email' => 'Email',
         'password' => 'Mot de passe',
         'phone' => 'Téléphone',
-        'profile' => 'Profil',
+        'password_confirmation' => 'Confirmation du mot de passe',
+        'avatar_visibility' => 'Qui voit ma photo',
         'code' => 'Code',
         'current_password' => 'Mot de passe actuel',
         'new_password' => 'Nouveau mot de passe',
@@ -38,7 +39,10 @@ final class AuthController
 
     private const CODE_SENT = 'Si un compte correspond à cette adresse, un code vient d\'y être envoyé.';
 
-    /** Créer un compte : profil Client ou Commerçant (le partenaire est créé sur le web) */
+    /**
+     * Créer un compte : toujours CLIENT. Pour vendre, le client envoie ensuite une demande (pièce d'identité,
+     * photos) validée par un agent Axi ; le partenaire est créé sur le web.
+     */
     public function register(Request $req): never
     {
         $min = (int) Config::get('auth.password_min');
@@ -47,10 +51,13 @@ final class AuthController
             'last_name' => 'required|string|max:60',
             'email' => 'required|email',
             'password' => "required|string|raw|minlen:$min|max:72",
+            'password_confirmation' => 'string|raw|max:72',
             'phone' => 'phone',
-            'profile' => 'required|in:client,merchant',
             'lang' => 'in:fr,en,fon,yo',
         ], self::LABELS);
+        if (isset($in['password_confirmation']) && !hash_equals($in['password'], $in['password_confirmation'])) {
+            Validator::fail(['password_confirmation' => 'Les deux mots de passe ne sont pas identiques.'], self::LABELS);
+        }
 
         if (Database::value('SELECT id FROM users WHERE email = ?', [$in['email']]) !== null) {
             throw new HttpException(409, 'EMAIL_TAKEN', 'Un compte existe déjà avec cette adresse email. Connectez-vous ou choisissez « Mot de passe oublié ».');
@@ -63,7 +70,7 @@ final class AuthController
             $id = Database::insert(
                 'INSERT INTO users (first_name, last_name, name, email, password_hash, phone, role, lang, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 [$in['first_name'], $in['last_name'], $in['first_name'] . ' ' . $in['last_name'], $in['email'],
-                    password_hash($in['password'], PASSWORD_DEFAULT), $in['phone'] ?? null, $in['profile'], $in['lang'] ?? 'fr', Clock::now()],
+                    password_hash($in['password'], PASSWORD_DEFAULT), $in['phone'] ?? null, 'client', $in['lang'] ?? 'fr', Clock::now()],
             );
         } catch (\PDOException $e) {
             if ($e->getCode() === '23000') {
@@ -238,6 +245,7 @@ final class AuthController
             'last_name' => 'string|max:60',
             'phone' => 'phone',
             'lang' => 'in:fr,en,fon,yo',
+            'avatar_visibility' => 'in:everyone,contacts,nobody',
         ], self::LABELS);
 
         if (isset($in['phone']) && Database::value('SELECT id FROM users WHERE phone = ? AND id <> ?', [$in['phone'], $req->userId()]) !== null) {
