@@ -13,10 +13,15 @@ final class StallInput
         'name' => 'Nom de l\'étal', 'tagline' => 'Description', 'site_id' => 'Site', 'aisle_id' => 'Allée',
         'row' => 'Rangée', 'stand' => 'Stand', 'phone' => 'Téléphone', 'whatsapp' => 'WhatsApp',
         'delivery_note' => 'Livraison', 'map_url' => 'Plan', 'merchant_type' => 'Type de commerçant',
+        'site_other' => 'Nom du marché', 'aisle_other' => 'Nom de l\'allée',
     ];
 
+    /** Choix « Autre » : l'étal est rangé dans ces entrées en attendant qu'un agent crée la vraie allée ou le vrai marché */
+    public const OTHER_SITE = 'autre';
+    public const OTHER_AISLE = 'autres';
+
     /** Champs d'emplacement : leur changement retire le badge « vérifié » jusqu'à la visite d'un agent */
-    public const LOCATION_FIELDS = ['site_id', 'row_label', 'stand', 'has_physical_place'];
+    public const LOCATION_FIELDS = ['site_id', 'site_other', 'row_label', 'stand', 'has_physical_place'];
 
     /** @return array colonnes de la table stalls */
     public static function validate(array $data, bool $creating, ?array $only = null): array
@@ -26,6 +31,8 @@ final class StallInput
             'tagline' => 'string|max:160',
             'site_id' => ($creating ? 'required|' : '') . 'string|max:30',
             'aisle_id' => ($creating ? 'required|' : '') . 'string|max:30',
+            'site_other' => 'string|max:100',
+            'aisle_other' => 'string|max:100',
             'row' => 'string|max:30',
             'stand' => 'string|max:20',
             'has_physical_place' => 'bool',
@@ -51,6 +58,22 @@ final class StallInput
         }
         if (isset($in['map_url']) && !preg_match('#^https://#', $in['map_url'])) {
             Validator::fail(['map_url' => 'Lien https:// attendu.'], self::LABELS);
+        }
+
+        // « Autre » : un nom libre est obligatoire ; un vrai choix de la liste efface le nom libre
+        foreach (['site' => self::OTHER_SITE, 'aisle' => self::OTHER_AISLE] as $name => $other) {
+            if (!isset($in[$name . '_id'])) {
+                unset($in[$name . '_other']);
+                continue;
+            }
+            if ($in[$name . '_id'] === $other) {
+                if (mb_strlen(trim((string) ($in[$name . '_other'] ?? ''))) < 2) {
+                    Validator::fail([$name . '_other' => 'Écrivez le nom ' . ($name === 'site' ? 'du marché.' : 'de l\'allée.')], self::LABELS);
+                }
+                $in[$name . '_other'] = trim($in[$name . '_other']);
+            } else {
+                $in[$name . '_other'] = null;
+            }
         }
 
         $columns = [];

@@ -15,6 +15,7 @@ use Axi\Services\Broadcaster;
 use Axi\Services\Settings;
 use Axi\Services\Uploads;
 use Axi\Support\Merchant;
+use Axi\Support\Subscription;
 use Axi\Support\Stalls;
 
 /**
@@ -151,6 +152,7 @@ final class ClientsController
     public function followUp(Request $req): never
     {
         $stall = Merchant::stall($req);
+        Subscription::require((int) $stall['id'], 'La relance d\'un client');
         $client = $this->find($req, (int) $stall['id']);
         $result = Broadcaster::send($stall, 'follow_up', null, $stall['name'] . ' pense à vous', 'De nouveaux produits vous attendent chez ' . $stall['name'] . ' (' . Stalls::location($stall)['label'] . '). Commandez sur Axi et payez à la réception.', [$client]);
         Database::run('UPDATE merchant_clients SET last_follow_up_at = ? WHERE id = ?', [Clock::now(), $client['id']]);
@@ -160,6 +162,7 @@ final class ClientsController
     public function broadcast(Request $req): never
     {
         $stall = Merchant::stall($req);
+        Subscription::require((int) $stall['id'], 'Le message groupé');
         $in = Validator::validate($req->all(), [
             'segment' => 'required|in:all,resellers,loyal,to_follow_up',
             'channel' => 'in:axi,whatsapp',
@@ -173,6 +176,7 @@ final class ClientsController
     public function relocation(Request $req): never
     {
         $stall = Merchant::stall($req);
+        Subscription::require((int) $stall['id'], 'L\'envoi de votre nouvelle adresse');
         $location = Stalls::location($stall);
         $text = $stall['name'] . ' vous accueille à sa nouvelle adresse : ' . $location['label'] . '.' . ($location['map_url'] !== null ? ' Plan : ' . $location['map_url'] : '');
         $result = Broadcaster::send($stall, 'relocation', 'all', 'Nouvelle adresse de ' . $stall['name'], $text, $this->clients((int) $stall['id'], 'all'));
@@ -186,6 +190,7 @@ final class ClientsController
     public function arrival(Request $req): never
     {
         $stall = Merchant::stall($req);
+        Subscription::require((int) $stall['id'], 'L\'annonce d\'arrivage');
         $audio = $req->file('audio') ?? Validator::fail(['audio' => 'Enregistrez votre message vocal.'], ['audio' => 'Message vocal']);
         Response::ok(Broadcaster::send($stall, 'arrival', 'loyal', 'Arrivage chez ' . $stall['name'], 'Écoutez le message vocal de ' . $stall['name'] . ' sur ses nouveaux produits.', $this->clients((int) $stall['id'], 'loyal'), Uploads::audio($audio)));
     }

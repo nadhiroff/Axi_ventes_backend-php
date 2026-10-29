@@ -25,6 +25,7 @@ final class SalesController
         'released' => 'Libéré au commerçant',
         'refunded' => 'Remboursé',
         'disputed' => 'Litige en cours',
+        'cash' => 'Payé en espèces à la remise',
     ];
 
     private const PROVIDERS = ['fedapay' => 'FedaPay', 'kkiapay' => 'KkiaPay', 'fake' => 'Test'];
@@ -71,7 +72,7 @@ final class SalesController
         $in = Validator::validate($q, [
             'from' => 'string|max:10',
             'to' => 'string|max:10',
-            'status' => 'in:all,pending,held,released,refunded,disputed,cancelled',
+            'status' => 'in:all,pending,held,released,refunded,disputed,cash,cancelled',
             'q' => 'string|max:80',
         ], ['from' => 'Du', 'to' => 'Au', 'status' => 'Statut']);
         foreach (['from', 'to'] as $k) {

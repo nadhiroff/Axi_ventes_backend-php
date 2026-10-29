@@ -13,13 +13,16 @@ final class Stalls
 {
     private const NEW_PRODUCT_DAYS = 3;
 
+    /** Produit visible des clients : publié et pas épuisé (stock non suivi ou > 0). Alias de table : p */
+    public const VISIBLE = "p.status = 'active' AND (p.stock_quantity IS NULL OR p.stock_quantity > 0)";
+
     /**
      * Étals actifs (compte du commerçant actif) avec leur site. $where et $suffix sont écrits dans le code.
      */
     public static function query(string $where = '1', array $params = [], string $suffix = '', bool $includeInactive = false): array
     {
-        $sql = 'SELECT s.*, si.name AS site_name, si.map_url AS site_map_url, u.name AS owner_name, u.status AS owner_status,
-                  EXISTS (SELECT 1 FROM products p WHERE p.stall_id = s.id AND p.status = \'active\' AND p.created_at > ?) AS has_new
+        $sql = 'SELECT s.*, IF(s.site_id = \'autre\' AND s.site_other IS NOT NULL, s.site_other, si.name) AS site_name, si.map_url AS site_map_url, u.name AS owner_name, u.status AS owner_status,
+                  EXISTS (SELECT 1 FROM products p WHERE p.stall_id = s.id AND ' . self::VISIBLE . ' AND p.created_at > ?) AS has_new
                 FROM stalls s
                 JOIN sites si ON si.id = s.site_id
                 JOIN users u ON u.id = s.user_id
@@ -103,8 +106,9 @@ final class Stalls
     /** Produits publiés d'un étal : « Disponible aujourd'hui » en premier, puis du plus récent au plus ancien */
     public static function products(int $stallId, int $offset = 0, ?int $limit = null, bool $withDrafts = false): array
     {
-        $sql = 'SELECT * FROM products WHERE stall_id = ? AND status ' . ($withDrafts ? 'IN (\'active\', \'draft\')' : '= \'active\'')
-            . ' ORDER BY status = \'draft\' DESC, is_today DESC, updated_at DESC, id DESC';
+        // Côté commerçant ($withDrafts) : brouillons, produits masqués et épuisés aussi
+        $sql = 'SELECT p.* FROM products p WHERE p.stall_id = ? AND ' . ($withDrafts ? 'p.status IN (\'active\', \'draft\', \'paused\')' : self::VISIBLE)
+            . ' ORDER BY p.status = \'draft\' DESC, p.is_today DESC, p.updated_at DESC, p.id DESC';
         if ($limit !== null) {
             $sql .= ' LIMIT ' . ($limit + 1) . ' OFFSET ' . $offset;
         }
@@ -138,7 +142,9 @@ final class Stalls
                 'amount_max' => $p['price_max'] === null ? null : (int) $p['price_max'],
                 'currency' => 'XOF',
             ],
-            'in_stock' => (bool) $p['in_stock'],
+            'in_stock' => (bool) $p['in_stock'] && ($p['stock_quantity'] === null || (int) $p['stock_quantity'] > 0),
+            'stock_quantity' => $p['stock_quantity'] === null ? null : (int) $p['stock_quantity'],
+            'sold_out' => $p['stock_quantity'] !== null && (int) $p['stock_quantity'] === 0,
             'is_today' => (bool) $p['is_today'],
             'status' => $p['status'],
             'has_voice_note' => $p['audio_path'] !== null,

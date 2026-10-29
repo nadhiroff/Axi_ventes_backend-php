@@ -10,7 +10,8 @@ use Axi\Services\Payment\Escrow;
 /**
  * Tâches planifiées (cron/run.php ou /v1/internal/cron?key=) : vérification des paiements en attente,
  * relance de paiement, annulation des commandes jamais payées, libération automatique, rappels
- * (commande en cours, abonnement à renouveler), prix médians d'Axi Pro, ménage.
+ * (commande en cours, abonnement à renouveler), prix médians d'Axi Pro, limite sans abonnement,
+ * messages de plus de 24 h effacés, ménage. À lancer toutes les heures (voir README).
  */
 final class Nightly
 {
@@ -24,6 +25,8 @@ final class Nightly
             'released_orders' => self::autoRelease(),
             'subscription_reminders' => self::subscriptionReminders(),
             'median_prices' => self::medianPrices(),
+            'paused_products' => self::enforceFreeLimits(),
+            'expired_messages' => Messaging::purgeExpired(),
             'deleted_codes' => Database::run('DELETE FROM email_codes WHERE created_at < ?', [Clock::now(-2 * 86400)])->rowCount(),
         ];
     }
@@ -69,7 +72,21 @@ final class Nightly
                 Escrow::log('order_expired', ['payment' => $row['payment_id'], 'order' => $row['id']], 'system', null, 'pending', 'expired');
                 return true;
             });
+            if ($done) {
+                Escrow::restoreStock((int) $row['id']);
+            }
             $n += (int) $done;
+        }
+        return $n;
+    }
+
+    /** Abonnement expiré : au-delà de la limite gratuite, les produits les plus anciens sont masqués (pas supprimés) */
+    private static function enforceFreeLimits(): int
+    {
+        $n = 0;
+        $limit = \Axi\Support\Subscription::productLimit();
+        foreach (Database::all("SELECT stall_id FROM products WHERE status = 'active' GROUP BY stall_id HAVING COUNT(*) > ?", [$limit]) as $row) {
+            $n += \Axi\Support\Subscription::enforce((int) $row['stall_id']);
         }
         return $n;
     }

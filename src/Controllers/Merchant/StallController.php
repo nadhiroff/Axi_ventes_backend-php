@@ -28,23 +28,12 @@ final class StallController
     public function options(Request $req): never
     {
         Response::ok([
-            'sites' => Database::all('SELECT id, name FROM sites WHERE active = 1 ORDER BY sort_order, name'),
-            'aisles' => array_map(static fn (array $a): array => ['id' => $a['id'], 'name' => $a['name'], 'icon' => $a['icon']], Database::all('SELECT * FROM aisles WHERE active = 1 ORDER BY sort_order, name')),
+            // « Autre » n'est pas dans les listes : l'application l'ajoute avec un champ libre (id « autre » / « autres »)
+            'sites' => Database::all('SELECT id, name FROM sites WHERE active = 1 AND id <> \'autre\' ORDER BY sort_order, name'),
+            'aisles' => array_map(static fn (array $a): array => ['id' => $a['id'], 'name' => $a['name'], 'icon' => $a['icon']], Database::all('SELECT * FROM aisles WHERE active = 1 AND id <> \'autres\' ORDER BY sort_order, name')),
+            'other_site_id' => 'autre',
+            'other_aisle_id' => 'autres',
         ], 200, 3600);
-    }
-
-    /** Création de l'étal par le commerçant (premier lancement) ; vérification sur place demandée à un agent */
-    public function create(Request $req): never
-    {
-        if (Database::value('SELECT id FROM stalls WHERE user_id = ?', [$req->userId()]) !== null) {
-            throw new HttpException(409, 'STALL_EXISTS', 'Votre étal existe déjà.');
-        }
-        $columns = StallInput::validate($req->all(), true);
-        $columns += ['phone' => $req->user['phone'], 'whatsapp' => $req->user['phone']];
-        $columns += ['user_id' => $req->userId(), 'created_at' => Clock::now(), 'updated_at' => Clock::now()];
-        Database::insert('INSERT INTO stalls (' . implode(', ', array_keys($columns)) . ') VALUES (' . Database::in($columns) . ')', array_values($columns));
-        Database::run('INSERT INTO agent_visit_requests (user_id, created_at) VALUES (?, ?)', [$req->userId(), Clock::now()]);
-        Response::ok($this->payload($req), 201);
     }
 
     public function show(Request $req): never
@@ -177,6 +166,9 @@ final class StallController
             'stall' => Stalls::detail($stall, null) + [
                 'status' => $stall['status'],
                 'has_physical_place' => (bool) $stall['has_physical_place'],
+                'site_other' => $stall['site_other'],
+                'aisle_other' => $stall['aisle_other'],
+                'subscription' => \Axi\Support\Subscription::present($stall),
                 'verification_requested' => $visit !== null && in_array($visit['status'], ['new', 'scheduled'], true),
             ],
             'products' => $products,
