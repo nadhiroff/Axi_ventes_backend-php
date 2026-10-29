@@ -80,6 +80,7 @@ return static function (Router $r): void {
 
     // Client : accueil, allées, recherche, étals, produits (visite libre)
     $r->get('/v1/home', [CatalogController::class, 'home'], Router::OPTIONAL);
+    $r->get('/v1/rates', [CatalogController::class, 'rates'], Router::OPTIONAL);
     $r->get('/v1/aisles/{id}/stalls', [CatalogController::class, 'aisle'], Router::OPTIONAL);
     $r->get('/v1/search', [CatalogController::class, 'search'], Router::OPTIONAL);
     $r->post('/v1/search/voice', [CatalogController::class, 'voiceSearch'], Router::OPTIONAL);
@@ -115,6 +116,8 @@ return static function (Router $r): void {
     $r->get('/v1/merchant/stall', [StallController::class, 'show'], $merchant);
     $r->patch('/v1/merchant/stall', [StallController::class, 'update'], $merchant);
     $r->post('/v1/merchant/stall/photo', [StallController::class, 'photo'], $merchant);
+    $r->post('/v1/merchant/stall/photos', [StallController::class, 'addGalleryPhotos'], $merchant);
+    $r->delete('/v1/merchant/stall/photos/{index}', [StallController::class, 'removeGalleryPhoto'], $merchant);
     $r->post('/v1/merchant/verification-request', [StallController::class, 'requestVisit'], $merchant);
     $r->post('/v1/merchant/products', [StallController::class, 'createProduct'], $merchant);
     $r->post('/v1/merchant/products/voice', [StallController::class, 'createVoiceProduct'], $merchant);

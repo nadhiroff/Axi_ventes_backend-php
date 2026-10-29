@@ -66,6 +66,7 @@ selfie, stall_photo`. `409 APPLICATION_PENDING` si une demande attend déjà. Un
 | `POST /v1/conversations/{conv_…}/messages` | JSON `{ body }` ou multipart `photo` / `audio` ; 20 par minute au plus |
 | `PATCH /v1/conversations/{conv_…}/messages/{msg_…}` `{ body }` · `DELETE …` | modifier (texte) ou supprimer pour tout le monde SON message |
 
+Envoi : `reply_to` (msg_…) pour répondre à un message précis ; chaque message renvoie `reply { id, mine, kind, preview }` ou `null`.
 Mes messages : `status` `sent` (✓), `delivered` (✓✓ : application de l'autre ouverte), `read` (✓✓ bleu) ; `edited`, `deleted`.
 Conversation : `other_online` (application ouverte il y a moins d'une minute), `other_last_seen_at`.
 
@@ -98,6 +99,7 @@ Types de notifications : `order, payment, reminder, promotion, arrival, account`
 | `GET /v1/products/{prd_…}` | produit + `images[]` + `stall` + `is_favorite` ; enregistré dans « récemment vus » |
 | `POST/DELETE /v1/stalls/{id}/follow` · `POST /v1/stalls/{id}/voice-messages` (multipart `audio`) | connecté |
 | `POST /v1/promotions/{spn_…}/click` | compte un clic |
+| `GET /v1/rates` | taux pour afficher en € ou $ : `rates { XOF: 1, EUR: 655.957, USD: … }` (F CFA pour 1 unité ; paiement toujours en F CFA) |
 
 Chaque produit : `image` (1ʳᵉ photo ou `null`) et `images[]` (galerie, URL **absolues** WebP `thumb_url` ~200 px,
 `medium_url` ~600 px, immuables). `price: null` = « Prix à débattre ».
@@ -131,6 +133,7 @@ Commande : `status` (`awaiting_payment, paid, preparing, on_the_way, delivered, 
 | Route | Rôle |
 |---|---|
 | `GET /v1/merchant/stall-options` | sites et allées actifs |
+| `POST /v1/merchant/stall/photos` (multipart `photos[]`, 8 au plus) · `DELETE /v1/merchant/stall/photos/{index}` | galerie de l'étal ; la page publique renvoie `photos[]` (principale + galerie) et `followers_count` |
 | `GET · PATCH /v1/merchant/stall` · `POST /v1/merchant/stall/photo` | vitrine ; changer site / rangée / stand retire le badge jusqu'à la visite d'un agent |
 | `POST /v1/merchant/verification-request` | demander la visite d'un agent |
 | `POST /v1/merchant/products` (multipart `photos[0..4]`, `name, price, price_max, is_today`) | produit en photo |

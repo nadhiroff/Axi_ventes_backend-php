@@ -89,7 +89,7 @@ final class MessagesController
         ]);
     }
 
-    /** Envoyer : JSON { body } ou multipart { photo | audio, body? } */
+    /** Envoyer : JSON { body, reply_to? } ou multipart { photo | audio, body?, reply_to? } (reply_to : msg_… auquel on répond) */
     public function send(Request $req): never
     {
         $c = $this->participant($req);
@@ -98,7 +98,15 @@ final class MessagesController
         if ($recent >= self::PER_MINUTE) {
             throw new HttpException(429, 'TOO_MANY_REQUESTS', 'Vous envoyez beaucoup de messages. Patientez une minute.', ['retry_after' => 60]);
         }
-        $body = trim((string) (Validator::validate($req->all(), ['body' => 'string|max:2000'], ['body' => 'Message'])['body'] ?? ''));
+        $in = Validator::validate($req->all(), ['body' => 'string|max:2000', 'reply_to' => 'string'], ['body' => 'Message', 'reply_to' => 'Réponse']);
+        $body = trim((string) ($in['body'] ?? ''));
+        $replyTo = null;
+        if (isset($in['reply_to']) && $in['reply_to'] !== '') {
+            $replyTo = Ids::tryDecode('msg', $in['reply_to']);
+            if ($replyTo === null || Database::value('SELECT id FROM messages WHERE id = ? AND conversation_id = ?', [$replyTo, $c['id']]) === null) {
+                throw new HttpException(422, 'VALIDATION_ERROR', 'Le message auquel vous répondez n\'existe plus.');
+            }
+        }
         $kind = 'text';
         $path = null;
         $width = $height = null;
@@ -111,10 +119,10 @@ final class MessagesController
             Validator::fail(['body' => 'Écrivez un message.'], ['body' => 'Message']);
         }
         $now = Clock::now();
-        $id = Database::transaction(function () use ($c, $me, $kind, $body, $path, $width, $height, $now): int {
+        $id = Database::transaction(function () use ($c, $me, $kind, $body, $path, $width, $height, $now, $replyTo): int {
             $id = Database::insert(
-                'INSERT INTO messages (conversation_id, sender_id, kind, body, file_path, file_width, file_height, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                [$c['id'], $me, $kind, $body === '' ? null : $body, $path, $width, $height, $now, Messaging::expiresAt((int) $c['client_id'], (int) $c['stall_id'])],
+                'INSERT INTO messages (conversation_id, sender_id, kind, body, file_path, file_width, file_height, reply_to_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [$c['id'], $me, $kind, $body === '' ? null : $body, $path, $width, $height, $replyTo, $now, Messaging::expiresAt((int) $c['client_id'], (int) $c['stall_id'])],
             );
             $mine = (int) $c['client_id'] === $me ? 'client_read_at' : 'merchant_read_at';
             Database::run("UPDATE conversations SET last_message_at = ?, $mine = ? WHERE id = ?", [$now, $now, $c['id']]);
@@ -179,9 +187,10 @@ final class MessagesController
         // L'application est ouverte : « en ligne », et les messages reçus passent à ✓✓ chez l'expéditeur
         $now = Clock::now();
         Database::run('UPDATE users SET last_seen_at = ? WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)', [$now, $me, Clock::now(-20)]);
-        Database::run('UPDATE conversations SET client_delivered_at = ? WHERE client_id = ? AND last_message_at IS NOT NULL AND (client_delivered_at IS NULL OR client_delivered_at < last_message_at)', [$now, $me]);
+        $max = '(SELECT COALESCE(MAX(m.id), 0) FROM messages m WHERE m.conversation_id = c.id)';
+        Database::run("UPDATE conversations c SET c.client_delivered_at = ?, c.client_delivered_msg_id = $max WHERE c.client_id = ? AND c.last_message_at IS NOT NULL AND (c.client_delivered_at IS NULL OR c.client_delivered_at <= c.last_message_at)", [$now, $me]);
         if ($stallId > 0) {
-            Database::run('UPDATE conversations SET merchant_delivered_at = ? WHERE stall_id = ? AND last_message_at IS NOT NULL AND (merchant_delivered_at IS NULL OR merchant_delivered_at < last_message_at)', [$now, $stallId]);
+            Database::run("UPDATE conversations c SET c.merchant_delivered_at = ?, c.merchant_delivered_msg_id = $max WHERE c.stall_id = ? AND c.last_message_at IS NOT NULL AND (c.merchant_delivered_at IS NULL OR c.merchant_delivered_at <= c.last_message_at)", [$now, $stallId]);
         }
         $unread = (int) Database::value(
             'SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id
@@ -227,7 +236,8 @@ final class MessagesController
     {
         $side = (int) $c['client_id'] === $me ? 'client' : 'merchant';
         $now = Clock::now();
-        Database::run("UPDATE conversations SET {$side}_read_at = ?, {$side}_delivered_at = ? WHERE id = ?", [$now, $now, $c['id']]);
+        $max = (int) Database::value('SELECT COALESCE(MAX(id), 0) FROM messages WHERE conversation_id = ?', [$c['id']]);
+        Database::run("UPDATE conversations SET {$side}_read_at = ?, {$side}_delivered_at = ?, {$side}_read_msg_id = GREATEST({$side}_read_msg_id, ?), {$side}_delivered_msg_id = GREATEST({$side}_delivered_msg_id, ?) WHERE id = ?", [$now, $now, $max, $max, $c['id']]);
         Database::run('UPDATE users SET last_seen_at = ? WHERE id = ?', [$now, $me]);
     }
 
@@ -284,22 +294,41 @@ final class MessagesController
      * Message vu par $me. Pour ses propres messages, « status » comme WhatsApp :
      * sent (✓ reçu par Axi), delivered (✓✓ arrivé sur le téléphone de l'autre), read (✓✓ bleu, conversation ouverte).
      */
+    /** Aperçu du message auquel on répond (« Message supprimé » ou « effacé » s'il n'est plus visible) */
+    private function reply(?int $id, int $me): ?array
+    {
+        if ($id === null) {
+            return null;
+        }
+        $r = Database::one('SELECT m.* FROM messages m WHERE m.id = ? AND ' . Messaging::VISIBLE, [$id]);
+        if ($r === null) {
+            return ['id' => Ids::encode('msg', $id), 'mine' => false, 'kind' => 'text', 'preview' => 'Message effacé'];
+        }
+        return [
+            'id' => Ids::encode('msg', $r['id']),
+            'mine' => (int) $r['sender_id'] === $me,
+            'kind' => $r['kind'],
+            'preview' => $r['deleted_at'] !== null ? 'Message supprimé' : match ($r['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', default => mb_substr((string) $r['body'], 0, 120) },
+        ];
+    }
+
     private function message(array $m, int $me, array $c): array
     {
         $mine = (int) $m['sender_id'] === $me;
         $otherSide = (int) $c['client_id'] === $me ? 'merchant' : 'client';
-        $readAt = $c[$otherSide . '_read_at'];
-        $deliveredAt = $c[$otherSide . '_delivered_at'];
+        $readId = (int) $c[$otherSide . '_read_msg_id'];
+        $deliveredId = (int) $c[$otherSide . '_delivered_msg_id'];
         $deleted = $m['deleted_at'] !== null;
         return [
             'id' => Ids::encode('msg', $m['id']),
             'mine' => $mine,
             'status' => !$mine ? null : match (true) {
-                $readAt !== null && $readAt > $m['created_at'] => 'read',
-                $deliveredAt !== null && $deliveredAt > $m['created_at'] => 'delivered',
+                $readId >= (int) $m['id'] => 'read',
+                max($readId, $deliveredId) >= (int) $m['id'] => 'delivered',
                 default => 'sent',
             },
             'edited' => $m['edited_at'] !== null && !$deleted,
+            'reply' => $this->reply($m['reply_to_id'] === null ? null : (int) $m['reply_to_id'], $me),
             'deleted' => $deleted,
             'kind' => $m['kind'],
             'body' => $m['body'],
