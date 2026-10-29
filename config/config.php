@@ -28,6 +28,8 @@ return [
         'password' => Env::get('MAIL_PASSWORD', ''),
         'from_name' => Env::get('MAIL_FROM_NAME', 'Axi'),
     ],
+    // Prestataire Mobile Money : « fake » (APP_ENV=local seulement) ; le vrai prestataire viendra plus tard
+    'payment_provider' => Env::get('PAYMENT_PROVIDER', ''),
     'cors_origins' => array_values(array_filter(array_map('trim', explode(',', (string) Env::get('CORS_ORIGINS', ''))))),
     'auth' => [
         'token_ttl_days' => (int) Env::get('TOKEN_TTL_DAYS', '90'),
