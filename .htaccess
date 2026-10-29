@@ -3,5 +3,7 @@
 Options -Indexes
 RewriteEngine On
 RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+# Signale à PHP que la réécriture d'adresse fonctionne (liens courts /pro/connexion)
+RewriteRule .* - [E=AXI_REWRITE:1]
 RewriteCond %{REQUEST_URI} !/public/
 RewriteRule ^(.*)$ public/$1 [L]
