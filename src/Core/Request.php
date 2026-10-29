@@ -71,13 +71,13 @@ final class Request
             }
             $data = json_decode($raw, true);
             if (!is_array($data)) {
-                throw new HttpException(400, 'INVALID_JSON', 'Corps JSON invalide');
+                throw new HttpException(400, 'INVALID_JSON', 'Requête invalide : le corps JSON est mal formé.');
             }
             return $data;
         }
         // Au-delà de post_max_size, PHP vide silencieusement $_POST et $_FILES
         if ($_POST === [] && $_FILES === [] && (int) ($_SERVER['CONTENT_LENGTH'] ?? 0) > 0 && str_contains($type, 'multipart/form-data')) {
-            throw new HttpException(413, 'FILE_TOO_LARGE', 'Fichier trop volumineux');
+            throw new HttpException(413, 'FILE_TOO_LARGE', 'Fichier trop volumineux.');
         }
         return $_POST;
     }
@@ -120,18 +120,24 @@ final class Request
         return preg_match('/^Bearer\s+(\S+)$/i', $auth, $m) ? $m[1] : null;
     }
 
-    /** Identifiant numérique de l'URL ({id}), 404 s'il n'est pas valide */
-    public function id(string $name = 'id'): int
+    /** Identifiant préfixé de l'URL ({id} = « stl_214 ») ; 404 avec ce code s'il n'est pas valide */
+    public function id(string $prefix, string $errorCode = 'NOT_FOUND', string $message = 'Ressource introuvable.'): int
     {
-        $value = $this->params[$name] ?? '';
-        if (!preg_match('/^[1-9]\d{0,9}$/', $value)) {
-            throw new HttpException(404, 'NOT_FOUND', 'Ressource introuvable');
-        }
-        return (int) $value;
+        return Ids::decode($prefix, $this->params['id'] ?? '', $errorCode, $message);
     }
 
     public function userId(): int
     {
         return (int) $this->user['id'];
+    }
+
+    public function role(): ?string
+    {
+        return $this->user['role'] ?? null;
+    }
+
+    public function ip(): string
+    {
+        return substr((string) ($_SERVER['REMOTE_ADDR'] ?? '0.0.0.0'), 0, 45);
     }
 }
