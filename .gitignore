@@ -1,0 +1,10 @@
+/config/config.local.php
+/storage/logs/*
+!/storage/logs/.gitkeep
+/public/uploads/images/*
+!/public/uploads/images/.gitkeep
+/public/uploads/audio/*
+!/public/uploads/audio/.gitkeep
+.DS_Store
+.idea/
+.vscode/
