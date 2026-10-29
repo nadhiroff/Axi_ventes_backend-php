@@ -27,7 +27,7 @@ Aucune connexion par téléphone ni par SMS. Le téléphone est un simple contac
 
 | Route | Corps | Réponse |
 |---|---|---|
-| `POST /v1/auth/register` | `first_name, last_name, email, password (8+), profile: client\|merchant, phone?, lang?` | `201 { user, message }` + code envoyé par email |
+| `POST /v1/auth/register` | `first_name, last_name, email, password (8+), password_confirmation, phone?, lang?` | `201 { user, message }` + code envoyé par email ; **toujours client** |
 | `POST /v1/auth/verify-email` | `email, code, device` | `{ token, user }` |
 | `POST /v1/auth/resend-code` | `email, purpose: verify_email\|reset_password` | `{ message }` (1/min, 5/h) |
 | `POST /v1/auth/login` | `email, password, device` | `{ token, user }` ; `403 EMAIL_NOT_VERIFIED` (code renvoyé), `403 PARTNER_USE_WEB` |
@@ -35,13 +35,37 @@ Aucune connexion par téléphone ni par SMS. Le téléphone est un simple contac
 | `POST /v1/auth/reset-password` | `email, code, password, device` | `{ token, user }` ; autres sessions fermées |
 | `POST /v1/auth/change-password` | `current_password, new_password` | `{ changed: true }` ; autres appareils déconnectés |
 | `POST /v1/auth/logout` · `POST /v1/auth/logout-all` | — | `{ logged_out: true }` |
-| `GET /v1/me` · `PATCH /v1/me` | `first_name?, last_name?, phone? (null pour effacer), lang?` | `user` |
+| `GET /v1/me` · `PATCH /v1/me` | `first_name?, last_name?, phone? (null pour effacer), lang?, avatar_visibility? (everyone\|contacts\|nobody)` | `user` |
+| `POST /v1/me/avatar` (multipart `photo`) · `DELETE /v1/me/avatar` | photo de profil facultative | `user` |
+| `GET /v1/me/badges` | messages et notifications non lus, rôle, félicitations en attente (à interroger toutes les 15 s) | `{ unread_messages, unread_notifications, role, merchant_welcome }` |
 
 ```json
 { "id": "usr_2", "first_name": "Afi", "last_name": "Houngbo", "name": "Afi Houngbo", "email": "afi@exemple.bj",
   "email_verified": true, "phone": null, "role": "merchant", "lang": "fr", "organization": null,
   "merchant": { "has_stall": true, "stall_id": "stl_1", "merchant_type": "retail", "verified": false } }
 ```
+
+`user` contient aussi `avatar`, `avatar_visibility`, `merchant_application { id, status: pending|approved|rejected, reject_reason }`
+(client) et `merchant_welcome` (félicitations à afficher une fois, puis `POST /v1/me/merchant-welcome/seen`).
+
+## Devenir commerçant
+
+Tout le monde s'inscrit client. `POST /v1/me/merchant-application` (multipart) : `phone, id_type (cni|cip|passport|other),
+id_number, stall_name, merchant_type, site_id | site_other, aisle_id | aisle_other, row?, stand?` + fichiers `id_front, id_back?,
+selfie, stall_photo`. `409 APPLICATION_PENDING` si une demande attend déjà. Un agent Axi accepte ou refuse dans l'espace web ;
+à l'acceptation : rôle `merchant`, étal créé et vérifié, email. `GET /v1/me/merchant-application` : dernière demande.
+`GET /v1/merchant/stall-options` (tout compte connecté) : listes + `other_site_id` (`autre`) et `other_aisle_id` (`autres`).
+
+## Messagerie client ↔ commerçant
+
+| Route | Rôle |
+|---|---|
+| `GET /v1/conversations` | mes conversations (`my_role`, `other`, `kept`, `retention_note`, `unread_count`, `last_message`) |
+| `POST /v1/stalls/{stl_…}/conversation` · `POST /v1/merchant/clients/{cli_…}/conversation` | ouvrir ou retrouver une conversation |
+| `GET /v1/conversations/{conv_…}/messages?after=msg_…` | messages visibles (marque comme lu) ; ETag : 304 si rien de neuf |
+| `POST /v1/conversations/{conv_…}/messages` | JSON `{ body }` ou multipart `photo` / `audio` ; 20 par minute au plus |
+
+Messages effacés 24 h après l'envoi (`message_ttl_hours`), sauf si le client suit l'étal ; s'il arrête, effacement 24 h plus tard.
 
 ## Paramètres et vie privée (enregistrés en base)
 
@@ -76,7 +100,10 @@ Chaque produit : `image` (1ʳᵉ photo ou `null`) et `images[]` (galerie, URL **
 
 ## Commandes et paiement (FedaPay ou KkiaPay, séquestre Axi)
 
-1. `POST /v1/orders/quote` `{ lines, reception: { mode: delivery|bus|axi_point, detail } }` → devis calculé avec les montants **en base**.
+1. `POST /v1/orders/quote` `{ lines, reception: { mode: delivery|bus|axi_point, detail }, payment_mode?: online|on_site }` → devis
+   calculé avec les montants **en base** : `total` (payé en ligne), `pay_on_site_available`, `service_fee`, `cash_total`.
+   Sur place : le client paie en ligne réception + regroupement + frais de service (= commission), et la marchandise en espèces.
+   Le stock des produits suivis est réservé à la commande et rendu si elle est annulée avant paiement.
 2. `POST /v1/orders` (même corps + `payment: { operator: null, phone: "" }`), en-tête **`Idempotency-Key`**
    (même clé = même commande : jamais deux débits). Réponse : la commande avec `payment.payment_url`.
 3. L'application ouvre `payment_url` dans une WebView. Le retour arrive sur `payment.return_url_prefix`
@@ -100,20 +127,26 @@ Commande : `status` (`awaiting_payment, paid, preparing, on_the_way, delivered, 
 | Route | Rôle |
 |---|---|
 | `GET /v1/merchant/stall-options` | sites et allées actifs |
-| `POST /v1/merchant/stall` | création de l'étal (non vérifié ; demande de visite d'agent créée) ; `404 STALL_REQUIRED` partout tant qu'il n'existe pas |
 | `GET · PATCH /v1/merchant/stall` · `POST /v1/merchant/stall/photo` | vitrine ; changer site / rangée / stand retire le badge jusqu'à la visite d'un agent |
 | `POST /v1/merchant/verification-request` | demander la visite d'un agent |
 | `POST /v1/merchant/products` (multipart `photos[0..4]`, `name, price, price_max, is_today`) | produit en photo |
 | `POST /v1/merchant/products/voice` (multipart `audio`, `photos[]?`) | brouillon dicté (`status: draft`, invisible des clients) |
-| `PATCH /v1/merchant/products/{id}` | `name, price (null = à débattre), price_max, in_stock, is_today, status: active` (publier) |
+| `PATCH /v1/merchant/products/{id}` | `name, price (null = à débattre), price_max, in_stock, stock_quantity (null = non suivi), is_today, status: active` (publier ou remettre en vente) |
 | `POST /v1/merchant/products/{id}/photos` · `DELETE …/photos/{index}` · `DELETE /v1/merchant/products/{id}` | photos, suppression |
 | `GET /v1/merchant/voice-messages` · `POST …/{vm_…}/listened` | messages vocaux des clients (lien audio signé) |
 | `GET /v1/merchant/today` · `POST /v1/merchant/orders/{id}/ready` | Ma journée |
 | `POST /v1/merchant/relocation/broadcast` · `POST /v1/merchant/arrivals` (multipart `audio`) | messages groupés |
 | `GET /v1/merchant/clients?segment&q` · `POST` · `GET/PATCH/DELETE /v1/merchant/clients/{id}` · `POST …/follow-up` · `POST /v1/merchant/broadcasts` | fichier clients |
 | `GET /v1/merchant/money` | `pending_amount, released_amount, paid_out_amount, subscription, supplier_offer, credit, data_sharing, payouts` |
-| `POST /v1/merchant/subscription/pay` · `POST /v1/merchant/subscription/verify` | abonnement via la passerelle (même parcours WebView) |
+| `POST /v1/merchant/subscription/pay` `{ period: month\|year }` · `POST /v1/merchant/subscription/verify` | abonnement via la passerelle (même parcours WebView) ; année = 12 mois − `subscription_yearly_discount` % |
 | `POST /v1/merchant/credit-requests` (`amount?`) · `PUT /v1/merchant/data-sharing` (`enabled`) | crédit, consentement |
 
 Messages groupés : réponse `{ recipients, notified, emailed, message, whatsapp_url, share_text }` : notification dans
 l'app pour les clients qui ont un compte Axi, email pour les autres, lien WhatsApp à partager. **Aucun SMS.**
+
+## Sans abonnement
+
+`402 SUBSCRIPTION_REQUIRED` (message affiché tel quel) : plus de `free_product_limit` produits en vente (5), messages groupés
+(relance, nouvelle adresse, arrivage, envoi à un segment). Les produits au-delà de la limite passent en `status: paused`
+(masqués, pas supprimés) et reviennent en vente au paiement de l'abonnement. `subscription.limits` et `subscription.benefits`
+décrivent ce qui est limité et ce que l'abonnement débloque.
