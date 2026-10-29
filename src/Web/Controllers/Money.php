@@ -106,7 +106,7 @@ final class Money
              WHERE os.escrow_state = 'released' AND os.payout_id IS NULL GROUP BY s.id, s.name, s.phone HAVING amount > 0 ORDER BY amount DESC",
         );
         $history = Database::all('SELECT p.*, s.name FROM payouts p JOIN stalls s ON s.id = p.stall_id ORDER BY p.id DESC LIMIT 50');
-        $body = '<h2 style="margin-top:0">À verser</h2>' . Html::table(['Étal', 'Téléphone Mobile Money', '#Commandes', '#Montant', ''], array_map(static fn (array $d): array => [
+        $body = '<h2>À verser</h2>' . Html::table(['Étal', 'Téléphone Mobile Money', '#Commandes', '#Montant', ''], array_map(static fn (array $d): array => [
             '<a href="' . View::url('/pro/commercants/' . $d['id']) . '">' . View::e($d['name']) . '</a>', View::e($d['phone'] ?? '—'), (string) $d['parts'], View::fcfa($d['amount']),
             View::action('/pro/commercants/' . $d['id'] . '/verser', 'Verser', [], 'Confirmer le versement de ' . View::fcfa($d['amount']) . ' à ' . $d['name'] . ' ?', 'btn ok'),
         ], $due), 'Aucune somme libérée en attente de versement.')

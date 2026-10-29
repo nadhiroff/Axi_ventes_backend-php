@@ -15,27 +15,56 @@ use Axi\Core\Url;
  */
 final class WebAuth
 {
+    private const ALL = ['axi', 'anagem', 'advertiser', 'mfi'];
+
+    /** Barre du haut, comme la maquette de la note de cadrage : [chemin, libellé, sous-types autorisés] */
     public const MENUS = [
-        // [chemin, libellé, sous-types autorisés]
-        ['/pro', 'Tableau de bord', ['axi', 'anagem', 'advertiser', 'mfi']],
-        ['/pro/commercants', 'Commerçants', ['axi']],
-        ['/pro/verifications', 'Vérifications sur place', ['axi']],
-        ['/pro/clients', 'Clients', ['axi']],
-        ['/pro/commandes', 'Commandes', ['axi']],
-        ['/pro/litiges', 'Litiges', ['axi']],
-        ['/pro/paiements', 'Paiements et séquestre', ['axi']],
-        ['/pro/versements', 'Versements', ['axi']],
-        ['/pro/allees', 'Sites et allées', ['axi']],
-        ['/pro/recensement', 'Recensement des étals', ['axi', 'anagem']],
-        ['/pro/activite', 'Suivi d\'activité', ['axi', 'anagem']],
+        ['/pro', 'Tableau de bord', self::ALL],
+        ['/pro/prix', 'Tendances du marché', self::ALL],
         ['/pro/campagnes', 'Campagnes', ['axi', 'advertiser']],
-        ['/pro/credits', 'Crédits', ['axi', 'mfi']],
-        ['/pro/prix', 'Prix médians', ['axi', 'anagem', 'advertiser', 'mfi']],
-        ['/pro/ventes', 'Ventes et paiements', ['axi', 'anagem', 'advertiser', 'mfi']],
-        ['/pro/partenaires', 'Comptes partenaires', ['axi']],
-        ['/pro/reglages', 'Réglages', ['axi']],
-        ['/pro/journal', 'Journal', ['axi']],
+        ['/pro/recensement', 'Recensement des étals', ['axi', 'anagem']],
+        ['/pro/credits', 'Financement', ['axi', 'mfi']],
     ];
+
+    /** Menu « Gestion » (agents Axi seulement) : tout le reste, regroupé */
+    public const MANAGE = [
+        ['/pro/demandes', 'Demandes commerçants'],
+        ['/pro/commercants', 'Commerçants'],
+        ['/pro/clients', 'Clients'],
+        ['/pro/commandes', 'Commandes et litiges'],
+        ['/pro/paiements', 'Paiements et versements'],
+        ['/pro/allees', 'Allées et marchés'],
+        ['/pro/partenaires', 'Comptes partenaires'],
+        ['/pro/reglages', 'Réglages'],
+        ['/pro/journal', 'Journal'],
+    ];
+
+    /** Onglets à l'intérieur d'une rubrique : [chemin, libellé, sous-types] */
+    public const TABS = [
+        [['/pro/prix', 'Prix médians', self::ALL], ['/pro/ventes', 'Ventes agrégées', self::ALL]],
+        [['/pro/recensement', 'Recensement', ['axi', 'anagem']], ['/pro/activite', 'Suivi d\'activité', ['axi', 'anagem']]],
+        [['/pro/commercants', 'Tous les commerçants', ['axi']], ['/pro/verifications', 'Vérifications sur place', ['axi']]],
+        [['/pro/commandes', 'Commandes', ['axi']], ['/pro/litiges', 'Litiges', ['axi']]],
+        [['/pro/paiements', 'Paiements', ['axi']], ['/pro/versements', 'Versements aux commerçants', ['axi']]],
+    ];
+
+    /** Rubrique du menu correspondant au chemin (« /pro/litiges » appartient à « Commandes et litiges ») */
+    public static function section(string $path): string
+    {
+        foreach (self::TABS as $tabs) {
+            foreach ($tabs as [$href]) {
+                if ($path === $href || str_starts_with($path, $href . '/')) {
+                    return $tabs[0][0];
+                }
+            }
+        }
+        foreach ([...array_column(self::MENUS, 0), ...array_column(self::MANAGE, 0)] as $href) {
+            if ($href !== '/pro' && ($path === $href || str_starts_with($path, $href . '/'))) {
+                return $href;
+            }
+        }
+        return $path;
+    }
 
     private static ?array $user = null;
 

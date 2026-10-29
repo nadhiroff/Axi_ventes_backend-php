@@ -52,7 +52,7 @@ final class AuthPages
         }
         AuthController::recordLogin((int) $user['id'], $email, $req->ip(), 'navigateur', 'web', true);
         WebAuth::login($user);
-        View::redirect('/pro');
+        View::redirect('/pro', 'Bienvenue, ' . $user['first_name'] . ' !');
     }
 
     public function logout(Request $req): never
@@ -88,6 +88,9 @@ final class AuthPages
             if (mb_strlen($password) < (int) Config::get('auth.password_min') || mb_strlen($password) > 72) {
                 throw new HttpException(422, 'VALIDATION_ERROR', 'Le mot de passe doit faire entre 8 et 72 caractères.');
             }
+            if (!hash_equals($password, (string) ($_POST['password_confirmation'] ?? ''))) {
+                throw new HttpException(422, 'VALIDATION_ERROR', 'Les deux mots de passe ne sont pas identiques.');
+            }
             EmailCodes::consume($email, 'reset_password', (string) ($_POST['code'] ?? ''));
             $user = Users::findByEmail($email) ?? throw new HttpException(422, 'CODE_INVALID', 'Code incorrect.');
             Database::run('UPDATE users SET password_hash = ? WHERE id = ?', [password_hash($password, PASSWORD_DEFAULT), $user['id']]);
@@ -103,15 +106,16 @@ final class AuthPages
     {
         $user = WebAuth::require();
         $logins = Database::all('SELECT * FROM login_events WHERE user_id = ? ORDER BY id DESC LIMIT 15', [$user['id']]);
-        $body = '<div class="row2"><div class="card"><h2 style="margin-top:0">Mes informations</h2><dl>'
+        $body = '<div class="row2"><div class="card"><h2>Mes informations</h2><dl>'
             . '<dt>Nom</dt><dd>' . View::e($user['name']) . '</dd><dt>Email</dt><dd>' . View::e($user['email']) . '</dd>'
             . '<dt>Organisation</dt><dd>' . View::e($user['org_name']) . ' (' . View::e(Users::PARTNER_TYPES[$user['partner_type']]) . ')</dd></dl></div>'
-            . '<div class="card"><h2 style="margin-top:0">Changer mon mot de passe</h2>'
+            . '<div class="card"><h2>Changer mon mot de passe</h2>'
             . Html::form('/pro/mon-compte/mot-de-passe', [
                 'current_password' => ['Mot de passe actuel', 'password', '', null],
-                'new_password' => ['Nouveau mot de passe (8 caractères minimum)', 'password', '', null],
-            ], 'Changer le mot de passe', 'Confirmer le changement de mot de passe ?') . '</div></div>'
-            . '<h2>Historique des connexions</h2>'
+                'new_password' => ['Nouveau mot de passe', 'password', '', ['hint' => '8 caractères minimum.', 'attrs' => ' minlength="8" autocomplete="new-password" required']],
+                'new_password_confirmation' => ['Confirmer le nouveau mot de passe', 'password', '', ['attrs' => ' minlength="8" autocomplete="new-password" required']],
+            ], 'Changer le mot de passe', 'Votre mot de passe sera remplacé.') . '</div></div>'
+            . Html::title('Historique des connexions')
             . Html::table(['Date', 'Résultat', 'Canal', 'Adresse IP'], array_map(static fn (array $l): array => [
                 View::date($l['created_at']), $l['success'] ? View::badge('Réussie', 'ok') : View::badge('Refusée', 'danger'), View::e($l['channel']), View::e($l['ip']),
             ], $logins));
@@ -128,6 +132,9 @@ final class AuthPages
         }
         if (mb_strlen($new) < (int) Config::get('auth.password_min') || mb_strlen($new) > 72) {
             View::redirect('/pro/mon-compte', 'Le nouveau mot de passe doit faire entre 8 et 72 caractères.', 'err');
+        }
+        if (!hash_equals($new, (string) ($_POST['new_password_confirmation'] ?? ''))) {
+            View::redirect('/pro/mon-compte', 'Les deux nouveaux mots de passe ne sont pas identiques.', 'err');
         }
         Database::run('UPDATE users SET password_hash = ? WHERE id = ?', [password_hash($new, PASSWORD_DEFAULT), $user['id']]);
         View::redirect('/pro/mon-compte', 'Mot de passe modifié.');
