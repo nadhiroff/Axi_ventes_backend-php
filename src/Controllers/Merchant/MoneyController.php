@@ -15,6 +15,7 @@ use Axi\Services\Payment\Escrow;
 use Axi\Services\Payment\Gateways;
 use Axi\Services\Settings;
 use Axi\Support\Merchant;
+use Axi\Support\Subscription;
 
 /**
  * « Mon argent » : argent bloqué (payé, en attente de réception), libéré, versé ; abonnement (payé via la
@@ -45,7 +46,7 @@ final class MoneyController
             'released_amount' => (int) $sums['released'],
             'paid_out_amount' => (int) $sums['paid_out'],
             'commission_rate_pct' => Settings::int('commission_rate'),
-            'subscription' => $this->subscription($stall),
+            'subscription' => Subscription::present($stall),
             'supplier_offer' => $this->supplierOffer($stall),
             'credit' => [
                 'title' => 'Votre historique ouvre l\'accès au crédit',
@@ -72,27 +73,34 @@ final class MoneyController
     }
 
     /**
-     * Payer l'abonnement via la passerelle. Réutilise le paiement en attente s'il existe : un double appui
-     * ne crée jamais deux paiements.
+     * Payer l'abonnement via la passerelle : { period: month | year } (année = réduction réglable en base).
+     * Réutilise le paiement en attente de la même durée : un double appui ne crée jamais deux paiements.
      */
     public function paySubscription(Request $req): never
     {
         $stall = Merchant::stall($req);
-        $payment = Database::withLock('axi_sub_' . $stall['id'], 15, static function () use ($req, $stall): array {
+        $period = Validator::validate($req->all(), ['period' => 'in:month,year'], ['period' => 'Durée'])['period'] ?? 'month';
+        $payment = Database::withLock('axi_sub_' . $stall['id'], 15, static function () use ($req, $stall, $period): array {
             $existing = Database::one(
                 'SELECT p.* FROM payments p JOIN subscriptions s ON s.id = p.subscription_id
-                 WHERE s.stall_id = ? AND p.status = \'pending\' AND p.created_at > ? ORDER BY p.id DESC LIMIT 1',
-                [$stall['id'], Clock::now(-3600)],
+                 WHERE s.stall_id = ? AND s.period = ? AND p.status = \'pending\' AND p.created_at > ? ORDER BY p.id DESC LIMIT 1',
+                [$stall['id'], $period, Clock::now(-3600)],
             );
             if ($existing !== null) {
                 return $existing;
             }
+            // Une demande en attente pour l'autre durée est abandonnée (jamais deux paiements ouverts)
+            Database::run(
+                'UPDATE payments p JOIN subscriptions s ON s.id = p.subscription_id SET p.status = \'cancelled\', p.failure_reason = \'remplacé par une autre durée\', s.status = \'cancelled\'
+                 WHERE s.stall_id = ? AND p.status = \'pending\' AND p.provider_ref IS NULL',
+                [$stall['id']],
+            );
             $plan = $stall['merchant_type'];
-            $amount = Settings::subscriptionAmount($plan);
-            return Database::transaction(static function () use ($req, $stall, $plan, $amount): array {
+            $amount = Settings::subscriptionPrice($plan, $period);
+            return Database::transaction(static function () use ($req, $stall, $plan, $period, $amount): array {
                 $subId = Database::insert(
-                    'INSERT INTO subscriptions (stall_id, plan, amount, paid_by, status, starts_on, ends_on, created_by, created_at) VALUES (?, ?, ?, \'merchant\', \'pending\', ?, ?, ?, ?)',
-                    [$stall['id'], $plan, $amount, Clock::localDate(), Clock::localDate(), $req->userId(), Clock::now()],
+                    'INSERT INTO subscriptions (stall_id, plan, period, amount, paid_by, status, starts_on, ends_on, created_by, created_at) VALUES (?, ?, ?, ?, \'merchant\', \'pending\', ?, ?, ?, ?)',
+                    [$stall['id'], $plan, $period, $amount, Clock::localDate(), Clock::localDate(), $req->userId(), Clock::now()],
                 );
                 $id = Database::insert(
                     'INSERT INTO payments (purpose, subscription_id, user_id, provider, reference, phone, amount, created_at) VALUES (\'subscription\', ?, ?, ?, ?, ?, ?, ?)',
@@ -118,7 +126,7 @@ final class MoneyController
         $tx = $req->input('transaction_id');
         Escrow::ensureInitiated((int) $payment['id']);
         Escrow::refresh((int) $payment['id'], 'merchant', $req->userId(), is_scalar($tx) && $payment['provider'] === 'kkiapay' ? (string) $tx : null);
-        Response::ok($this->presentPayment((int) $payment['id']) + ['subscription' => $this->subscription(Merchant::stall($req))]);
+        Response::ok($this->presentPayment((int) $payment['id']) + ['subscription' => Subscription::present(Merchant::stall($req))]);
     }
 
     /** Refusé tant que le partage d'historique avec l'IMF n'est pas accepté */
@@ -154,8 +162,9 @@ final class MoneyController
 
     private function presentPayment(int $paymentId): array
     {
-        $p = Database::one('SELECT * FROM payments WHERE id = ?', [$paymentId]);
+        $p = Database::one('SELECT p.*, s.period FROM payments p JOIN subscriptions s ON s.id = p.subscription_id WHERE p.id = ?', [$paymentId]);
         return [
+            'period' => $p['period'],
             'reference' => $p['reference'],
             'provider' => $p['provider'],
             'status' => $p['status'],
@@ -163,7 +172,7 @@ final class MoneyController
             'payment_url' => $p['status'] === 'pending' ? $p['payment_url'] : null,
             'return_url_prefix' => Url::to('/v1/payments/return'),
             'message' => match ($p['status']) {
-                'paid' => 'Abonnement payé : connexion incluse pour 30 jours.',
+                'paid' => 'Abonnement payé pour ' . ($p['period'] === 'year' ? 'un an' : 'un mois') . ' : vos produits sont tous visibles.',
                 'pending' => $p['payment_url'] === null ? 'La demande de paiement n\'a pas pu partir. Réessayez : vous ne serez débité qu\'une seule fois.' : 'Validez le paiement dans la page qui s\'ouvre.',
                 default => 'Paiement non abouti. Aucun montant n\'a été prélevé.',
             },
@@ -185,25 +194,6 @@ final class MoneyController
     {
         $first = Database::value('SELECT MIN(o.paid_at) FROM order_stalls os JOIN orders o ON o.id = os.order_id WHERE os.stall_id = ? AND o.paid_at IS NOT NULL', [$stallId]);
         return $first === null ? 0 : max(1, (int) floor((time() - strtotime($first . ' UTC')) / (30 * 86400)));
-    }
-
-    private function subscription(array $stall): array
-    {
-        $sub = Database::one('SELECT * FROM subscriptions WHERE stall_id = ? AND status = \'active\' ORDER BY ends_on DESC LIMIT 1', [$stall['id']]);
-        $plan = $stall['merchant_type'];
-        $amount = Settings::subscriptionAmount($plan);
-        $active = $sub !== null && $sub['ends_on'] >= Clock::localDate();
-        return [
-            'status' => $active ? 'active' : 'expired',
-            'status_label' => $active ? 'Actif' : ($sub === null ? 'Pas encore souscrit' : 'Expiré'),
-            'plan' => $plan,
-            'plan_label' => ($plan === 'wholesale' ? 'Formule Gros' : 'Formule Étal') . ' · ' . number_format($amount, 0, ',', ' ') . ' F par mois · connexion incluse',
-            'amount' => $amount,
-            'ends_on' => $sub['ends_on'] ?? null,
-            'next_due' => $sub === null ? Clock::localDate() : date('Y-m-d', strtotime($sub['ends_on'] . ' +1 day')),
-            'note' => ($sub['paid_by'] ?? null) === 'anagem' ? 'Inclus dans votre place à ' . $stall['site_name'] : null,
-            'can_pay' => ($sub['paid_by'] ?? 'merchant') === 'merchant',
-        ];
     }
 
     /** Campagne « Offre fournisseur » validée qui vise l'allée et le site du commerçant */

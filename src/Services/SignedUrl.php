@@ -15,7 +15,8 @@ final class SignedUrl
 {
     public static function make(string $path, array $params, int $ttlSeconds): string
     {
-        $params['exp'] = time() + $ttlSeconds;
+        // Arrondi aux 5 minutes suivantes : le lien reste identique d'un appel à l'autre (ETag stable, 304)
+        $params['exp'] = (int) (ceil((time() + $ttlSeconds) / 300) * 300);
         ksort($params);
         $params['sig'] = self::sign($path, $params);
         return Url::to($path) . '?' . http_build_query($params);

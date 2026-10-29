@@ -39,6 +39,10 @@ final class FakeGateway implements Gateway
 
     public function status(array $payment): array
     {
+        // Demande jamais arrivée à la passerelle (coupure simulée) : rien n'a pu être payé
+        if ($payment['payment_url'] === null) {
+            return ['state' => 'pending', 'amount' => (int) $payment['amount'], 'provider_ref' => null, 'raw' => 'fake_not_sent'];
+        }
         return ['state' => 'paid', 'amount' => (int) $payment['amount'], 'provider_ref' => $payment['provider_ref'], 'raw' => 'fake_success'];
     }
 

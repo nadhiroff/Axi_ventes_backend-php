@@ -21,7 +21,9 @@ final class Response
             // L'ETag ignore server_time, sinon il changerait à chaque appel
             $etag = '"' . md5(self::encode($data)) . '"';
             header('ETag: ' . $etag);
-            header('Cache-Control: private, max-age=' . $maxAge);
+            // no-cache : le téléphone revalide toujours (304 sans corps si rien n'a changé). Avec max-age,
+            // le cache HTTP d'iOS resservait une ancienne réponse (ex. « Suivre » sans effet visible).
+            header('Cache-Control: private, no-cache');
             header('Vary: Authorization, Accept-Encoding');
             if (self::matches($_SERVER['HTTP_IF_NONE_MATCH'] ?? '', $etag)) {
                 http_response_code(304);

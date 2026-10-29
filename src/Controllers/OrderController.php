@@ -14,6 +14,7 @@ use Axi\Services\Notifier;
 use Axi\Services\Payment\Escrow;
 use Axi\Services\Payment\Gateways;
 use Axi\Services\Settings;
+use Axi\Support\Stalls;
 
 /**
  * Panier multi-étals (gardé sur le téléphone) : devis, commande, paiement unique Mobile Money,
@@ -25,9 +26,9 @@ final class OrderController
 
     public function quote(Request $req): never
     {
-        [$lines, $reception] = $this->input($req);
-        $quote = $this->compute($lines, $reception['mode']);
-        unset($quote['_parts']);
+        [$lines, $reception, $paymentMode] = $this->input($req);
+        $quote = $this->compute($lines, $reception['mode'], $paymentMode);
+        unset($quote['_parts'], $quote['_commissions']);
         Response::ok($quote);
     }
 
@@ -38,10 +39,14 @@ final class OrderController
      * - verrou par client contre deux requêtes simultanées, un seul paiement par commande en base ;
      * - la commande et son paiement (référence fixe) sont enregistrés AVANT d'appeler la passerelle,
      *   qui refuse elle-même un doublon de référence.
+     * Le stock des produits suivis est réservé dans la même transaction (jamais vendu deux fois) et rendu
+     * si la commande est annulée avant paiement.
+     * payment_mode « on_site » : le client paie en ligne les frais (réception, regroupement, service Axi)
+     * et la marchandise en espèces au commerçant à la remise.
      */
     public function create(Request $req): never
     {
-        [$lines, $reception] = $this->input($req);
+        [$lines, $reception, $paymentMode] = $this->input($req);
         $payment = $req->input('payment');
         $operator = is_array($payment) ? ($payment['operator'] ?? null) : null;
         if ($operator !== null && !in_array($operator, ['mtn', 'moov', 'celtiis'], true)) {
@@ -73,10 +78,10 @@ final class OrderController
         // Empreinte du panier : produits triés, quantités, réception et paiement
         $normalized = array_map(static fn (array $l): string => $l['public_id'] . 'x' . $l['quantity'], $lines);
         sort($normalized);
-        $hash = hash('sha256', json_encode([$normalized, $reception['mode'], $detail, $operator, $phone]));
+        $hash = hash('sha256', json_encode([$normalized, $reception['mode'], $detail, $operator, $phone, $paymentMode]));
         $provider = Gateways::get()->name();
 
-        [$orderId, $paymentId, $replayed] = Database::withLock('axi_order_' . $req->userId(), 15, function () use ($req, $key, $hash, $lines, $reception, $detail, $pointId, $operator, $phone, $provider): array {
+        [$orderId, $paymentId, $replayed] = Database::withLock('axi_order_' . $req->userId(), 15, function () use ($req, $key, $hash, $lines, $reception, $detail, $pointId, $operator, $phone, $provider, $paymentMode): array {
             $existing = $key !== null
                 ? Database::one('SELECT id, request_hash FROM orders WHERE client_id = ? AND idempotency_key = ?', [$req->userId(), $key])
                 : Database::one(
@@ -90,33 +95,45 @@ final class OrderController
                 return [(int) $existing['id'], (int) Database::value('SELECT id FROM payments WHERE order_id = ?', [$existing['id']]), true];
             }
 
-            $quote = $this->compute($lines, $reception['mode']);
+            $quote = $this->compute($lines, $reception['mode'], $paymentMode);
             if ($quote['unavailable_product_ids'] !== []) {
-                throw new HttpException(422, 'PRODUCT_UNAVAILABLE', 'Certains produits ne sont plus disponibles. Retirez-les du panier pour continuer.', ['unavailable_product_ids' => $quote['unavailable_product_ids']]);
+                throw new HttpException(422, 'PRODUCT_UNAVAILABLE', 'Certains produits ne sont plus disponibles ou plus en quantité suffisante. Retirez-les du panier pour continuer.', ['unavailable_product_ids' => $quote['unavailable_product_ids']]);
             }
-            return Database::transaction(function () use ($req, $key, $hash, $quote, $reception, $detail, $pointId, $operator, $phone, $provider): array {
+            if ($paymentMode === 'on_site' && !$quote['pay_on_site_available']) {
+                throw new HttpException(422, 'PAY_ON_SITE_UNAVAILABLE', 'Un des commerçants de votre panier n\'accepte pas le paiement sur place. Payez en ligne.');
+            }
+            return Database::transaction(function () use ($req, $key, $hash, $quote, $reception, $detail, $pointId, $operator, $phone, $provider, $paymentMode): array {
                 $now = Clock::now();
-                $rate = Settings::commissionRate();
-                $commissionTotal = 0;
                 $orderId = Database::insert(
-                    'INSERT INTO orders (client_id, idempotency_key, request_hash, items_total, grouping_fee, reception_fee, total, reception_mode, reception_detail, axi_point_id, payment_operator, payment_phone, created_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                    [$req->userId(), $key, $hash, $quote['items_total'], $quote['grouping_fee'], $quote['reception_fee'], $quote['total'],
+                    'INSERT INTO orders (client_id, idempotency_key, request_hash, items_total, grouping_fee, reception_fee, payment_mode, service_fee, total, reception_mode, reception_detail, axi_point_id, payment_operator, payment_phone, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    [$req->userId(), $key, $hash, $quote['items_total'], $quote['grouping_fee'], $quote['reception_fee'], $paymentMode, $quote['service_fee'], $quote['total'],
                         $reception['mode'], mb_substr($detail, 0, 255), $pointId, $operator, $phone, $now],
                 );
+                $commissionTotal = 0;
                 foreach ($quote['_parts'] as $stallId => $items) {
                     $itemsTotal = array_sum(array_column($items, 'line_total'));
-                    $commission = (int) round($itemsTotal * $rate);
+                    $commission = $quote['_commissions'][$stallId];
                     $commissionTotal += $commission;
+                    // Sur place, le commerçant encaisse lui-même : rien ne lui est dû par Axi (net 0)
                     $partId = Database::insert(
                         'INSERT INTO order_stalls (order_id, stall_id, items_total, commission, net_amount, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-                        [$orderId, $stallId, $itemsTotal, $commission, $itemsTotal - $commission, $now],
+                        [$orderId, $stallId, $itemsTotal, $commission, $paymentMode === 'on_site' ? 0 : $itemsTotal - $commission, $now],
                     );
                     foreach ($items as $item) {
                         Database::run(
                             'INSERT INTO order_items (order_stall_id, product_id, name, unit_price, quantity, line_total) VALUES (?, ?, ?, ?, ?, ?)',
                             [$partId, $item['product_id'], $item['name'], $item['unit_price'], $item['quantity'], $item['line_total']],
                         );
+                        // Réservation atomique du stock : refusée si un autre client vient de prendre les dernières pièces
+                        // (stock non suivi = NULL : rien à réserver)
+                        $reserved = Database::run(
+                            'UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ? AND stock_quantity >= ?',
+                            [$item['quantity'], $item['product_id'], $item['quantity']],
+                        )->rowCount();
+                        if ($reserved === 0 && Database::value('SELECT stock_quantity FROM products WHERE id = ?', [$item['product_id']]) !== null) {
+                            throw new HttpException(422, 'PRODUCT_UNAVAILABLE', '« ' . $item['name'] . ' » n\'est plus disponible en quantité suffisante. Modifiez le panier pour continuer.', ['unavailable_product_ids' => [Ids::encode('prd', $item['product_id'])]]);
+                        }
                     }
                 }
                 Database::run('UPDATE orders SET commission_total = ? WHERE id = ?', [$commissionTotal, $orderId]);
@@ -134,6 +151,7 @@ final class OrderController
             header('Idempotent-Replayed: true');
         } else {
             $this->confirmationEmail($orderId);
+            $this->notifySoldOut($orderId);
         }
         Escrow::ensureInitiated($paymentId);
         // Pas de vérification ici : le client n'a pas encore pu payer (il ouvre la page de paiement ensuite)
@@ -181,6 +199,7 @@ final class OrderController
         }
         Database::run('UPDATE order_stalls SET status = \'cancelled\' WHERE order_id = ?', [$id]);
         Database::run('UPDATE payments SET status = \'cancelled\', failure_reason = \'annulée par le client\' WHERE order_id = ? AND status = \'pending\'', [$id]);
+        Escrow::restoreStock($id);
         Escrow::log('order_cancelled', ['payment' => $payment['id'], 'order' => $id], 'client', $req->userId(), 'pending', 'cancelled');
         Response::ok($this->present($id, false));
     }
@@ -221,11 +240,15 @@ final class OrderController
         return $id;
     }
 
-    /** @return array{0: array, 1: array} */
+    /** @return array{0: array, 1: array, 2: string} lignes, réception, mode de paiement (online | on_site) */
     private function input(Request $req): array
     {
         $rawLines = $req->input('lines');
         $reception = $req->input('reception');
+        $paymentMode = $req->input('payment_mode', 'online');
+        if (!in_array($paymentMode, ['online', 'on_site'], true)) {
+            Validator::fail(['payment_mode' => 'Choisissez le paiement en ligne ou sur place.'], ['payment_mode' => 'Paiement']);
+        }
         if (!is_array($rawLines) || $rawLines === [] || count($rawLines) > 100) {
             Validator::fail(['lines' => 'Le panier est vide.'], ['lines' => 'Panier']);
         }
@@ -240,18 +263,21 @@ final class OrderController
             }
             $lines[] = ['public_id' => $line['product_id'], 'product_id' => Ids::tryDecode('prd', $line['product_id']), 'quantity' => $quantity];
         }
-        return [$lines, $reception];
+        return [$lines, $reception, $paymentMode];
     }
 
-    /** Devis : produits épuisés, supprimés ou à prix débattu signalés dans unavailable_product_ids */
-    private function compute(array $lines, string $mode): array
+    /**
+     * Devis : produits épuisés (ou stock insuffisant), supprimés ou à prix débattu signalés dans unavailable_product_ids.
+     * total = montant payé maintenant en ligne ; sur place, cash_total = marchandise payée au commerçant.
+     */
+    private function compute(array $lines, string $mode, string $paymentMode = 'online'): array
     {
         $ids = array_values(array_filter(array_column($lines, 'product_id')));
         $products = [];
         if ($ids !== []) {
             foreach (Database::all(
                 'SELECT p.* FROM products p JOIN stalls s ON s.id = p.stall_id JOIN users u ON u.id = s.user_id
-                 WHERE p.id IN (' . Database::in($ids) . ') AND p.status = \'active\' AND p.in_stock = 1 AND p.price_amount IS NOT NULL
+                 WHERE p.id IN (' . Database::in($ids) . ') AND ' . Stalls::VISIBLE . ' AND p.in_stock = 1 AND p.price_amount IS NOT NULL
                    AND s.status = \'active\' AND u.status = \'active\'',
                 $ids,
             ) as $p) {
@@ -263,7 +289,7 @@ final class OrderController
         $parts = [];
         foreach ($lines as $line) {
             $p = $products[$line['product_id'] ?? 0] ?? null;
-            if ($p === null) {
+            if ($p === null || ($p['stock_quantity'] !== null && (int) $p['stock_quantity'] < $line['quantity'])) {
                 $unavailable[] = $line['public_id'];
                 continue;
             }
@@ -283,6 +309,19 @@ final class OrderController
         $stallCount = count($parts);
         $groupingFee = $stallCount > 1 ? $stallCount * Settings::int('grouping_fee_per_stall') : 0;
         $receptionFee = Settings::receptionFee($mode);
+        $rate = Settings::commissionRate();
+        $commissions = [];
+        foreach ($parts as $stallId => $items) {
+            $commissions[$stallId] = (int) round(array_sum(array_column($items, 'line_total')) * $rate);
+        }
+        $stallIds = array_keys($parts);
+        $onSiteOk = $stallIds !== [] && (int) Database::value(
+            'SELECT COUNT(*) FROM stalls WHERE id IN (' . Database::in($stallIds) . ') AND pay_on_delivery = 1',
+            $stallIds,
+        ) === count($stallIds);
+        $onSite = $paymentMode === 'on_site';
+        // Sur place : la commission Axi devient des « frais de service » payés en ligne par le client
+        $serviceFee = $onSite ? array_sum($commissions) : 0;
 
         return [
             'stall_count' => $stallCount,
@@ -290,7 +329,11 @@ final class OrderController
             'grouping_fee' => $groupingFee,
             'reception_fee' => $receptionFee,
             'reception_fee_label' => self::RECEPTION_LABELS[$mode],
-            'total' => $itemsTotal + $groupingFee + $receptionFee,
+            'payment_mode' => $paymentMode,
+            'pay_on_site_available' => $onSiteOk,
+            'service_fee' => $serviceFee,
+            'cash_total' => $onSite ? $itemsTotal : 0,
+            'total' => ($onSite ? 0 : $itemsTotal) + $groupingFee + $receptionFee + $serviceFee,
             'axi_points' => array_map(static fn (array $pt): array => [
                 'id' => Ids::encode('pt', $pt['id']),
                 'name' => $pt['name'],
@@ -298,6 +341,7 @@ final class OrderController
             ], Database::all('SELECT * FROM axi_points WHERE active = 1 ORDER BY sort_order, id')),
             'unavailable_product_ids' => array_values(array_unique($unavailable)),
             '_parts' => $parts,
+            '_commissions' => $commissions,
         ];
     }
 
@@ -326,13 +370,18 @@ final class OrderController
             'items_total' => (int) $order['items_total'],
             'grouping_fee' => (int) $order['grouping_fee'],
             'reception_fee' => (int) $order['reception_fee'],
+            'payment_mode' => $order['payment_mode'],
+            'service_fee' => (int) $order['service_fee'],
+            'cash_total' => $order['payment_mode'] === 'on_site' ? (int) $order['items_total'] : 0,
             'reception' => [
                 'mode' => $order['reception_mode'],
                 'label' => self::RECEPTION_LABELS[$order['reception_mode']],
                 'detail' => $order['reception_mode'] === 'axi_point' ? (string) $order['point_name'] : $order['reception_detail'],
             ],
             'payment_instructions' => !$awaiting ? null
-                : ($sent ? 'Ouvrez la page de paiement et validez avec votre compte Mobile Money. Vous ne serez débité qu\'une seule fois.'
+                : ($sent ? ($order['payment_mode'] === 'on_site'
+                        ? 'Payez maintenant les frais en Mobile Money (' . Escrow::fcfa((int) $order['total']) . '). La marchandise (' . Escrow::fcfa((int) $order['items_total']) . ') se paie en espèces au commerçant à la remise.'
+                        : 'Ouvrez la page de paiement et validez avec votre compte Mobile Money. Vous ne serez débité qu\'une seule fois.')
                     : 'La demande de paiement n\'a pas pu partir. Réessayez : vous ne serez débité qu\'une seule fois.'),
             'payment' => $payment === null ? null : [
                 'reference' => $payment['reference'],
@@ -386,10 +435,30 @@ final class OrderController
             $rows[] = ['Regroupement', Escrow::fcfa((int) $order['grouping_fee'])];
         }
         $rows[] = [self::RECEPTION_LABELS[$order['reception_mode']], Escrow::fcfa((int) $order['reception_fee'])];
-        $rows[] = ['Total à payer', Escrow::fcfa((int) $order['total'])];
+        if ($order['payment_mode'] === 'on_site') {
+            $rows[] = ['Frais de service Axi', Escrow::fcfa((int) $order['service_fee'])];
+            $rows[] = ['À payer maintenant en Mobile Money', Escrow::fcfa((int) $order['total'])];
+            $rows[] = ['À payer en espèces au commerçant', Escrow::fcfa((int) $order['items_total'])];
+        } else {
+            $rows[] = ['Total à payer', Escrow::fcfa((int) $order['total'])];
+        }
         Notifier::send((int) $order['client_id'], 'order', 'Commande cmd_' . $orderId . ' enregistrée', 'Votre commande est enregistrée. Payez-la en Mobile Money pour que vos commerçants la préparent.', ['order_id' => 'cmd_' . $orderId], [
             ['Votre commande est enregistrée. Payez-la une seule fois en Mobile Money : l\'argent reste chez Axi jusqu\'à ce que vous confirmiez la réception.'],
             ['rows' => $rows],
         ]);
+    }
+
+    /** Prévient le commerçant quand une commande vient d'épuiser un produit (il peut le réapprovisionner) */
+    private function notifySoldOut(int $orderId): void
+    {
+        $rows = Database::all(
+            'SELECT DISTINCT p.name, s.user_id FROM order_items i JOIN order_stalls os ON os.id = i.order_stall_id
+             JOIN products p ON p.id = i.product_id JOIN stalls s ON s.id = p.stall_id
+             WHERE os.order_id = ? AND p.stock_quantity = 0',
+            [$orderId],
+        );
+        foreach ($rows as $r) {
+            Notifier::send((int) $r['user_id'], 'order', 'Stock épuisé : ' . $r['name'], '« ' . $r['name'] . ' » n\'est plus visible des clients. Indiquez votre nouveau stock dans « Mon étal » pour le remettre en vente.', []);
+        }
     }
 }

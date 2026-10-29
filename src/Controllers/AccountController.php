@@ -259,7 +259,7 @@ final class AccountController
         $rows = Database::all(
             'SELECT p.*, s.name AS stall_name, s.verified_at AS stall_verified_at FROM favorites f
              JOIN products p ON p.id = f.product_id JOIN stalls s ON s.id = p.stall_id
-             WHERE f.user_id = ? AND p.status = \'active\' AND s.status = \'active\' ORDER BY f.created_at DESC LIMIT 100',
+             WHERE f.user_id = ? AND ' . Stalls::VISIBLE . ' AND s.status = \'active\' ORDER BY f.created_at DESC LIMIT 100',
             [$req->userId()],
         );
         Response::ok(['products' => $this->withStall($rows)]);
@@ -284,7 +284,7 @@ final class AccountController
         $rows = Database::all(
             'SELECT p.*, s.name AS stall_name, s.verified_at AS stall_verified_at FROM product_views v
              JOIN products p ON p.id = v.product_id JOIN stalls s ON s.id = p.stall_id
-             WHERE v.user_id = ? AND p.status = \'active\' AND s.status = \'active\' ORDER BY v.viewed_at DESC LIMIT 30',
+             WHERE v.user_id = ? AND ' . Stalls::VISIBLE . ' AND s.status = \'active\' ORDER BY v.viewed_at DESC LIMIT 30',
             [$req->userId()],
         );
         Response::ok(['products' => $this->withStall($rows)]);
@@ -337,5 +337,20 @@ final class AccountController
                 'month' => gmdate('Y-m'),
             ],
         ];
+    }
+
+    /** Photo de profil (facultative) : multipart « photo ». Qui la voit : PATCH /v1/me { avatar_visibility } */
+    public function avatar(Request $req): never
+    {
+        $photo = $req->file('photo') ?? \Axi\Core\Validator::fail(['photo' => 'Choisissez une photo.'], ['photo' => 'Photo de profil']);
+        $saved = \Axi\Services\Uploads::photo($photo);
+        Database::run('UPDATE users SET avatar_path = ? WHERE id = ?', [$saved['path'], $req->userId()]);
+        Response::ok(\Axi\Support\Users::presentById($req->userId()));
+    }
+
+    public function deleteAvatar(Request $req): never
+    {
+        Database::run('UPDATE users SET avatar_path = NULL WHERE id = ?', [$req->userId()]);
+        Response::ok(\Axi\Support\Users::presentById($req->userId()));
     }
 }

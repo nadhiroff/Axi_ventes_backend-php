@@ -133,14 +133,19 @@ final class Escrow
                 // L'abonnement payé prolonge le précédent s'il court encore
                 $last = Database::value('SELECT MAX(ends_on) FROM subscriptions WHERE stall_id = ? AND status = \'active\'', [$sub['stall_id']]);
                 $start = $last !== null && $last >= Clock::localDate() ? date('Y-m-d', strtotime($last . ' +1 day')) : Clock::localDate();
-                Database::run('UPDATE subscriptions SET status = \'active\', starts_on = ?, ends_on = ? WHERE id = ?', [$start, date('Y-m-d', strtotime($start . ' +30 days')), $sub['id']]);
+                $days = $sub['period'] === 'year' ? 365 : 30;
+                Database::run('UPDATE subscriptions SET status = \'active\', starts_on = ?, ends_on = ? WHERE id = ?', [$start, date('Y-m-d', strtotime($start . ' +' . ($days - 1) . ' days')), $sub['id']]);
+                // Abonné : les produits masqués par la limite gratuite reviennent en vente
+                \Axi\Support\Subscription::resume((int) $sub['stall_id']);
                 return true;
             }
 
             Database::run('UPDATE orders SET status = \'paid\', paid_at = ? WHERE id = ? AND status = \'awaiting_payment\'', [$now, $payment['order_id']]);
+            // Paiement sur place : seuls les frais sont passés par Axi ; la marchandise sera payée en espèces au commerçant
+            $state = Database::value('SELECT payment_mode FROM orders WHERE id = ?', [$payment['order_id']]) === 'on_site' ? 'cash' : 'held';
             foreach (Database::all('SELECT * FROM order_stalls WHERE order_id = ?', [$payment['order_id']]) as $part) {
-                Database::run('UPDATE order_stalls SET status = \'to_prepare\', escrow_state = \'held\' WHERE id = ? AND escrow_state = \'pending\'', [$part['id']]);
-                self::log('escrow_held', ['payment' => $payment['id'], 'order' => $payment['order_id'], 'stall_part' => $part['id']], $actorType, $actorId, 'pending', 'held', $providerRef, (int) $part['net_amount']);
+                Database::run('UPDATE order_stalls SET status = \'to_prepare\', escrow_state = ? WHERE id = ? AND escrow_state = \'pending\'', [$state, $part['id']]);
+                self::log('escrow_' . $state, ['payment' => $payment['id'], 'order' => $payment['order_id'], 'stall_part' => $part['id']], $actorType, $actorId, 'pending', $state, $providerRef, (int) $part['net_amount']);
             }
             self::addToClientFiles((int) $payment['order_id']);
             return true;
@@ -150,7 +155,8 @@ final class Escrow
         }
         // Emails et notifications après la transaction (un SMTP lent ne bloque pas la base)
         if ($payment['purpose'] === 'subscription') {
-            Notifier::send((int) $payment['user_id'], 'payment', 'Abonnement Axi payé', 'Votre abonnement est actif pour 30 jours, connexion incluse.', ['payment_reference' => $payment['reference']]);
+            $period = Database::value('SELECT period FROM subscriptions WHERE id = ?', [$payment['subscription_id']]);
+            Notifier::send((int) $payment['user_id'], 'payment', 'Abonnement Axi payé', 'Votre abonnement est actif pour ' . ($period === 'year' ? 'un an' : 'un mois') . ' : produits sans limite et messages groupés débloqués.', ['payment_reference' => $payment['reference']]);
             return;
         }
         self::notifyPaid((int) $payment['order_id']);
@@ -171,8 +177,33 @@ final class Escrow
                 Database::run('UPDATE subscriptions SET status = \'cancelled\' WHERE id = ? AND status = \'pending\'', [$payment['subscription_id']]);
             }
         });
+        if ($payment['purpose'] === 'order') {
+            self::restoreStock((int) $payment['order_id']);
+        }
         $label = ['failed' => 'refusé', 'cancelled' => 'annulé', 'expired' => 'expiré'][$state];
         Notifier::send((int) $payment['user_id'], 'payment', "Paiement $label", "Votre paiement Mobile Money a été $label. Aucun montant n'a été prélevé. Vous pouvez recommencer depuis votre panier.", ['payment_reference' => $payment['reference']]);
+    }
+
+    /**
+     * Commande annulée avant paiement : le stock réservé revient en vente. Une seule fois par commande
+     * (stock_restored_at), même si l'annulation arrive par plusieurs chemins (client, passerelle, nuit).
+     */
+    public static function restoreStock(int $orderId): void
+    {
+        Database::transaction(static function () use ($orderId): void {
+            $n = Database::run(
+                'UPDATE orders SET stock_restored_at = ? WHERE id = ? AND status = \'cancelled\' AND stock_restored_at IS NULL',
+                [Clock::now(), $orderId],
+            )->rowCount();
+            if ($n === 0) {
+                return;
+            }
+            Database::run(
+                'UPDATE products p JOIN (SELECT i.product_id, SUM(i.quantity) AS qty FROM order_items i JOIN order_stalls os ON os.id = i.order_stall_id WHERE os.order_id = ? GROUP BY i.product_id) r ON r.product_id = p.id
+                 SET p.stock_quantity = p.stock_quantity + r.qty WHERE p.stock_quantity IS NOT NULL',
+                [$orderId],
+            );
+        });
     }
 
     /** Le client a reçu sa commande : chaque part bloquée est libérée au commerçant */
@@ -188,6 +219,8 @@ final class Escrow
                 return [];
             }
             $paymentId = (int) Database::value('SELECT id FROM payments WHERE order_id = ?', [$orderId]);
+            // Parts payées sur place : livrées, rien à libérer (le commerçant a été payé en espèces)
+            Database::run('UPDATE order_stalls SET status = \'delivered\', delivered_at = ? WHERE order_id = ? AND escrow_state = \'cash\'', [$now, $orderId]);
             $parts = Database::all('SELECT * FROM order_stalls WHERE order_id = ? AND escrow_state = \'held\'', [$orderId]);
             foreach ($parts as $part) {
                 Database::run('UPDATE order_stalls SET status = \'delivered\', escrow_state = \'released\', delivered_at = ?, released_at = ? WHERE id = ?', [$now, $now, $part['id']]);
@@ -214,7 +247,7 @@ final class Escrow
             $id = Database::insert('INSERT INTO disputes (order_id, order_stall_id, client_id, reason, created_at) VALUES (?, ?, ?, ?, ?)', [$orderId, $partId, $clientId, $reason, Clock::now()]);
             Database::run('UPDATE orders SET status = \'disputed\' WHERE id = ?', [$orderId]);
             $where = $partId === null ? 'order_id = ?' : 'id = ?';
-            foreach (Database::all("SELECT * FROM order_stalls WHERE $where AND escrow_state = 'held'", [$partId ?? $orderId]) as $part) {
+            foreach (Database::all("SELECT * FROM order_stalls WHERE $where AND escrow_state IN ('held', 'cash')", [$partId ?? $orderId]) as $part) {
                 Database::run('UPDATE order_stalls SET escrow_state = \'disputed\' WHERE id = ?', [$part['id']]);
                 self::log('escrow_disputed', ['order' => $orderId, 'stall_part' => $part['id']], 'client', $clientId, 'held', 'disputed', null, (int) $part['net_amount'], ['dispute_id' => $id]);
             }
@@ -261,6 +294,9 @@ final class Escrow
         $payment = Database::one('SELECT * FROM payments WHERE order_id = ?', [$orderId]) ?? throw new HttpException(404, 'NOT_FOUND', 'Paiement introuvable.');
         if (!in_array($payment['status'], ['paid', 'partially_refunded'], true)) {
             throw new HttpException(409, 'NOT_REFUNDABLE', 'Ce paiement ne peut pas être remboursé.');
+        }
+        if (Database::value('SELECT payment_mode FROM orders WHERE id = ?', [$orderId]) === 'on_site') {
+            return self::refundOnSiteFees($orderId, $payment, $reason, $actorId);
         }
         $refundable = array_sum(array_map(static fn (array $p): int => in_array($p['escrow_state'], ['held', 'disputed', 'delivered'], true) ? (int) $p['items_total'] - (int) $p['refunded_amount'] : 0, $parts));
         $full = $amount === null;
@@ -315,6 +351,34 @@ final class Escrow
         self::syncOrderAfterEscrow($orderId);
         Notifier::send((int) $payment['user_id'], 'payment', 'Remboursement', 'Axi a décidé un remboursement de ' . self::fcfa($amount + $fees) . ' pour la commande cmd_' . $orderId . '. ' . $result['message'], ['order_id' => 'cmd_' . $orderId]);
         return self::fcfa($amount + $fees) . ' : ' . $result['message'];
+    }
+
+    /**
+     * Commande payée sur place : Axi n'a reçu que les frais (réception, regroupement, service) ; c'est ce qui
+     * est rendu. La marchandise payée en espèces se règle entre le client et le commerçant.
+     */
+    private static function refundOnSiteFees(int $orderId, array $payment, string $reason, int $actorId): string
+    {
+        $amount = (int) $payment['amount'] - (int) $payment['refunded_amount'];
+        if ($amount <= 0) {
+            throw new HttpException(409, 'NOT_REFUNDABLE', 'Les frais de cette commande sont déjà remboursés.');
+        }
+        $result = Gateways::get($payment['provider'])->refund($payment, $amount);
+        if ($result['status'] === 'failed') {
+            throw new HttpException(502, 'REFUND_FAILED', $result['message']);
+        }
+        Database::transaction(static function () use ($orderId, $payment, $amount, $reason, $actorId, $result): void {
+            Database::run('UPDATE order_stalls SET escrow_state = \'refunded\', status = \'cancelled\' WHERE order_id = ? AND escrow_state IN (\'cash\', \'disputed\')', [$orderId]);
+            Database::run(
+                'INSERT INTO refunds (payment_id, order_stall_id, amount, reason, status, provider_ref, created_by, created_at) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)',
+                [$payment['id'], $amount, mb_substr('Frais (paiement sur place) : ' . $reason, 0, 255), $result['status'], $result['provider_ref'], $actorId, Clock::now()],
+            );
+            Database::run('UPDATE payments SET refunded_amount = amount, status = \'refunded\' WHERE id = ?', [$payment['id']]);
+            self::log('payment_refunded', ['payment' => $payment['id'], 'order' => $orderId], 'partner', $actorId, $payment['status'], 'refunded', $result['provider_ref'], $amount);
+        });
+        self::syncOrderAfterEscrow($orderId);
+        Notifier::send((int) $payment['user_id'], 'payment', 'Remboursement', 'Axi vous rembourse les frais payés en ligne (' . self::fcfa($amount) . ') pour la commande cmd_' . $orderId . '. ' . $result['message'], ['order_id' => 'cmd_' . $orderId]);
+        return self::fcfa($amount) . ' : ' . $result['message'];
     }
 
     /** Libération manuelle par un agent Axi (ou automatique après le délai configuré) */
@@ -413,14 +477,18 @@ final class Escrow
     private static function notifyPaid(int $orderId): void
     {
         $order = Database::one('SELECT * FROM orders WHERE id = ?', [$orderId]);
-        Notifier::send((int) $order['client_id'], 'payment', 'Paiement reçu', 'Nous avons reçu ' . self::fcfa((int) $order['total']) . ' pour la commande cmd_' . $orderId . '. L\'argent reste chez Axi jusqu\'à ce que vous confirmiez la réception.', ['order_id' => 'cmd_' . $orderId], [
-            ['Nous avons reçu votre paiement Mobile Money. L\'argent reste chez Axi jusqu\'à ce que vous confirmiez la réception de votre commande.'],
+        $onSite = $order['payment_mode'] === 'on_site';
+        $text = $onSite
+            ? 'Nous avons reçu ' . self::fcfa((int) $order['total']) . ' de frais pour la commande cmd_' . $orderId . '. Vous paierez ' . self::fcfa((int) $order['items_total']) . ' en espèces au commerçant à la remise.'
+            : 'Nous avons reçu ' . self::fcfa((int) $order['total']) . ' pour la commande cmd_' . $orderId . '. L\'argent reste chez Axi jusqu\'à ce que vous confirmiez la réception.';
+        Notifier::send((int) $order['client_id'], 'payment', 'Paiement reçu', $text, ['order_id' => 'cmd_' . $orderId], [
+            [$text],
             ['rows' => [['Commande', 'cmd_' . $orderId], ['Montant payé', self::fcfa((int) $order['total'])]]],
         ]);
         foreach (Database::all('SELECT os.*, s.user_id FROM order_stalls os JOIN stalls s ON s.id = os.stall_id WHERE os.order_id = ?', [$orderId]) as $part) {
             $items = Database::all('SELECT name, quantity FROM order_items WHERE order_stall_id = ?', [$part['id']]);
             $summary = implode(', ', array_map(static fn (array $i): string => $i['quantity'] . ' × ' . $i['name'], $items));
-            Notifier::send((int) $part['user_id'], 'order', 'Nouvelle commande payée', "À préparer : $summary (" . self::fcfa((int) $part['items_total']) . ').', ['order_id' => 'cmd_' . $orderId]);
+            Notifier::send((int) $part['user_id'], 'order', $onSite ? 'Nouvelle commande, paiement sur place' : 'Nouvelle commande payée', "À préparer : $summary." . ($onSite ? ' À encaisser en espèces à la remise : ' . self::fcfa((int) $part['items_total']) . '.' : ' (' . self::fcfa((int) $part['items_total']) . ')'), ['order_id' => 'cmd_' . $orderId]);
         }
     }
 

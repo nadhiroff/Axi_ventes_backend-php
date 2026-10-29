@@ -53,6 +53,26 @@ final class Uploads
         return ['path' => $relative, 'width' => $result['medium'][0], 'height' => $result['medium'][1]];
     }
 
+    /**
+     * Photo PRIVÉE (pièce d'identité, selfie) : une seule WebP de 1280 px max, hors de public/, nom aléatoire.
+     * Lue uniquement par un agent Axi connecté à l'espace web. @return string chemin relatif à storage/
+     */
+    public static function privatePhoto(array $file, string $folder): string
+    {
+        self::checkUpload($file, self::MAX_PHOTO_BYTES, 'La photo');
+        $source = @imagecreatefromstring((string) file_get_contents($file['tmp_name']));
+        if ($source === false) {
+            throw new HttpException(422, 'INVALID_PHOTO', 'La photo n\'a pas pu être lue. Envoyez une image WebP, JPEG ou PNG.');
+        }
+        $relative = 'private/' . $folder . '/' . gmdate('Y/m') . '/' . bin2hex(random_bytes(16)) . '.webp';
+        $path = BASE_PATH . '/storage/' . $relative;
+        if (!is_dir(dirname($path)) && !mkdir(dirname($path), 0770, true) && !is_dir(dirname($path))) {
+            throw new \RuntimeException('Impossible de créer ' . dirname($path));
+        }
+        imagewebp(self::resize($source, 1280), $path, 80);
+        return $relative;
+    }
+
     /** @return string chemin relatif à storage/ */
     public static function audio(array $file): string
     {

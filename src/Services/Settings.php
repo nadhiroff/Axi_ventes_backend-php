@@ -51,9 +51,21 @@ final class Settings
         return self::int('fee_' . $mode);
     }
 
+    /** Prix mensuel de la formule (retail ou wholesale) */
     public static function subscriptionAmount(string $plan): int
     {
         return self::int('subscription_' . $plan);
+    }
+
+    /** Prix payé : un mois, ou douze mois avec la réduction annuelle (arrondi à 100 F) */
+    public static function subscriptionPrice(string $plan, string $period): int
+    {
+        $monthly = self::subscriptionAmount($plan);
+        if ($period !== 'year') {
+            return $monthly;
+        }
+        $discount = min(50, max(0, self::int('subscription_yearly_discount')));
+        return (int) (round($monthly * 12 * (100 - $discount) / 100 / 100) * 100);
     }
 
     /** Modification depuis l'espace web, avec contrôle de chaque valeur */

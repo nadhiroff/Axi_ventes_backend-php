@@ -10,6 +10,7 @@ use Axi\Core\Ids;
 use Axi\Core\Request;
 use Axi\Core\Validator;
 use Axi\Support\Stalls;
+use Axi\Support\Subscription;
 
 /**
  * Produits : ajout par PHOTO (jusqu'à 5 photos) ou par VOCAL (brouillon à compléter), modification,
@@ -18,9 +19,12 @@ use Axi\Support\Stalls;
 final class Products
 {
     public const MAX_PHOTOS = 5;
-    private const LABELS = ['name' => 'Nom du produit', 'price' => 'Prix', 'price_max' => 'Prix maximum', 'product_ref_id' => 'Référence'];
+    private const LABELS = ['name' => 'Nom du produit', 'price' => 'Prix', 'price_max' => 'Prix maximum', 'product_ref_id' => 'Référence', 'stock_quantity' => 'Stock'];
 
-    /** POST multipart : photos[] ou photo, name, price (entier ou vide = à débattre), price_max, is_today, in_stock */
+    /**
+     * POST multipart : photos[] ou photo, name, price (entier ou vide = à débattre), price_max, is_today, in_stock,
+     * stock_quantity (vide = non suivi). Sans abonnement, le nombre de produits en vente est limité.
+     */
     public static function create(int $stallId, Request $req, int $createdBy): array
     {
         $in = Validator::validate($req->all(), [
@@ -29,16 +33,18 @@ final class Products
             'price_max' => 'int|min:1|maxval:100000000',
             'is_today' => 'bool',
             'in_stock' => 'bool',
+            'stock_quantity' => 'int|min:0|maxval:1000000',
             'product_ref_id' => 'string',
         ], self::LABELS);
         self::checkRange($in['price'] ?? null, $in['price_max'] ?? null);
+        Subscription::checkProductSlot($stallId);
         $photos = array_map([Uploads::class, 'photo'], $req->files('photos', 'photo', self::MAX_PHOTOS));
 
         $id = Database::transaction(static function () use ($stallId, $in, $createdBy, $photos): int {
             $id = Database::insert(
-                'INSERT INTO products (stall_id, product_ref_id, name, price_amount, price_max, in_stock, is_today, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                'INSERT INTO products (stall_id, product_ref_id, name, price_amount, price_max, in_stock, stock_quantity, is_today, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 [$stallId, self::ref($in['product_ref_id'] ?? null), $in['name'], $in['price'] ?? null, $in['price_max'] ?? null,
-                    (int) ($in['in_stock'] ?? true), (int) ($in['is_today'] ?? false), $createdBy, Clock::now(), Clock::now()],
+                    (int) ($in['in_stock'] ?? true), $in['stock_quantity'] ?? null, (int) ($in['is_today'] ?? false), $createdBy, Clock::now(), Clock::now()],
             );
             self::attach($id, $photos);
             Database::run('UPDATE stalls SET updated_at = ? WHERE id = ?', [Clock::now(), $stallId]);
@@ -96,7 +102,8 @@ final class Products
 
     /**
      * PATCH JSON : is_today, in_stock (contrat) ; name, price, price_max (le commerçant gère ses prix) ;
-     * status « active » pour publier un brouillon vocal.
+     * stock_quantity (null = non suivi ; réassort après épuisement) ; status « active » pour publier un brouillon
+     * vocal ou remettre en vente un produit masqué (dans la limite sans abonnement).
      */
     public static function update(int $productId, int $stallId, Request $req): array
     {
@@ -108,15 +115,16 @@ final class Products
             'price_max' => 'int|min:1|maxval:100000000',
             'is_today' => 'bool',
             'in_stock' => 'bool',
+            'stock_quantity' => 'int|min:0|maxval:1000000',
             'status' => 'in:active',
         ], self::LABELS);
 
         $fields = [];
-        foreach (['name' => 'name', 'is_today' => 'is_today', 'in_stock' => 'in_stock', 'price' => 'price_amount', 'price_max' => 'price_max', 'status' => 'status'] as $key => $column) {
+        foreach (['name' => 'name', 'is_today' => 'is_today', 'in_stock' => 'in_stock', 'stock_quantity' => 'stock_quantity', 'price' => 'price_amount', 'price_max' => 'price_max', 'status' => 'status'] as $key => $column) {
             if (array_key_exists($key, $in)) {
                 $fields[$column] = is_bool($in[$key]) ? (int) $in[$key] : $in[$key];
-            } elseif (in_array($key, ['price', 'price_max'], true) && array_key_exists($key, $body) && ($body[$key] === null || $body[$key] === '')) {
-                // price: null = « Prix à débattre »
+            } elseif (in_array($key, ['price', 'price_max', 'stock_quantity'], true) && array_key_exists($key, $body) && ($body[$key] === null || $body[$key] === '')) {
+                // price: null = « Prix à débattre » ; stock_quantity: null = stock non suivi
                 $fields[$column] = null;
             }
         }
@@ -129,6 +137,14 @@ final class Products
         );
         if (($fields['status'] ?? null) === 'active' && str_starts_with((string) ($fields['name'] ?? $product['name']), 'Produit dicté le ')) {
             Validator::fail(['name' => 'Donnez un nom au produit avant de le publier.'], self::LABELS);
+        }
+
+        if (($fields['status'] ?? null) === 'active' && $product['status'] !== 'active') {
+            Subscription::checkProductSlot($stallId, $productId);
+        }
+        // Réassort d'un produit épuisé : il redevient disponible
+        if (isset($fields['stock_quantity']) && $fields['stock_quantity'] > 0 && !array_key_exists('in_stock', $fields)) {
+            $fields['in_stock'] = 1;
         }
 
         if ($fields !== []) {
@@ -147,7 +163,7 @@ final class Products
     public static function find(int $productId, int $stallId, bool $withDrafts = false): array
     {
         return Database::one(
-            'SELECT * FROM products WHERE id = ? AND stall_id = ? AND status ' . ($withDrafts ? 'IN (\'active\', \'draft\')' : '= \'active\''),
+            'SELECT * FROM products WHERE id = ? AND stall_id = ? AND status ' . ($withDrafts ? 'IN (\'active\', \'draft\', \'paused\')' : '= \'active\''),
             [$productId, $stallId],
         ) ?? throw new HttpException(404, 'PRODUCT_NOT_FOUND', 'Ce produit n\'existe pas ou a été supprimé.');
     }

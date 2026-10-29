@@ -87,7 +87,7 @@ final class CatalogController
         Response::ok([
             'stall' => Stalls::detail($stall, $req->user === null ? null : $req->userId()),
             'products' => Stalls::productList(array_slice($products, 0, self::PRODUCTS_PER_PAGE)),
-            'products_updated_at' => Clock::iso(Database::value('SELECT MAX(updated_at) FROM products WHERE stall_id = ? AND status = \'active\'', [$id])),
+            'products_updated_at' => Clock::iso(Database::value('SELECT MAX(p.updated_at) FROM products p WHERE p.stall_id = ? AND ' . Stalls::VISIBLE, [$id])),
             'next_cursor' => Cursor::next($offset, self::PRODUCTS_PER_PAGE, count($products)),
         ], 200, 300);
     }
@@ -96,6 +96,8 @@ final class CatalogController
     {
         $id = $this->stallId($req);
         Database::run('INSERT IGNORE INTO stall_follows (user_id, stall_id, created_at) VALUES (?, ?, ?)', [$req->userId(), $id, Clock::now()]);
+        // Suivre l'étal garde la conversation avec le commerçant (sinon effacée après 24 h)
+        \Axi\Services\Messaging::keep($req->userId(), $id);
         Response::ok(['is_followed' => true]);
     }
 
@@ -103,6 +105,7 @@ final class CatalogController
     {
         $id = $this->stallId($req);
         Database::run('DELETE FROM stall_follows WHERE user_id = ? AND stall_id = ?', [$req->userId(), $id]);
+        \Axi\Services\Messaging::release($req->userId(), $id);
         Response::ok(['is_followed' => false]);
     }
 
@@ -135,7 +138,7 @@ final class CatalogController
         $products = Database::all(
             'SELECT p.*, s.name AS stall_name, s.verified_at AS stall_verified_at
              FROM products p JOIN stalls s ON s.id = p.stall_id JOIN users u ON u.id = s.user_id
-             WHERE p.status = \'active\' AND s.status = \'active\' AND u.status = \'active\' AND p.name LIKE ?
+             WHERE ' . Stalls::VISIBLE . ' AND s.status = \'active\' AND u.status = \'active\' AND p.name LIKE ?
              ORDER BY p.in_stock DESC, p.is_today DESC, p.updated_at DESC LIMIT 30',
             [$like],
         );
@@ -152,7 +155,7 @@ final class CatalogController
     public function product(Request $req): never
     {
         $id = $req->id('prd', 'PRODUCT_NOT_FOUND', 'Ce produit n\'existe pas ou a été supprimé.');
-        $p = Database::one('SELECT * FROM products WHERE id = ? AND status = \'active\'', [$id]);
+        $p = Database::one('SELECT p.* FROM products p WHERE p.id = ? AND ' . Stalls::VISIBLE, [$id]);
         $stall = $p === null ? null : Stalls::findActive((int) $p['stall_id']);
         if ($stall === null) {
             throw new HttpException(404, 'PRODUCT_NOT_FOUND', 'Ce produit n\'existe pas ou a été supprimé.');
