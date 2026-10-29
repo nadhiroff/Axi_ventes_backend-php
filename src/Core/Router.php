@@ -78,8 +78,8 @@ final class Router
         }
 
         if ($allowed) {
-            throw new HttpException(405, 'METHOD_NOT_ALLOWED', 'Méthode non autorisée', [], ['Allow' => implode(', ', $allowed)]);
+            throw new HttpException(405, 'METHOD_NOT_ALLOWED', 'Méthode non autorisée.', [], ['Allow' => implode(', ', $allowed)]);
         }
-        throw new HttpException(404, 'NOT_FOUND', 'Route introuvable');
+        throw new HttpException(404, 'NOT_FOUND', 'Cette adresse n\'existe pas.');
     }
 }
