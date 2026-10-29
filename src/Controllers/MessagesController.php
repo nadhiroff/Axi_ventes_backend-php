@@ -25,6 +25,8 @@ use Axi\Support\Users;
 final class MessagesController
 {
     private const PER_MINUTE = 20;
+    /** Message pas supprimé « pour moi » (paramètre : mon id) */
+    private const NOT_HIDDEN = ' AND NOT EXISTS (SELECT 1 FROM message_hidden h WHERE h.message_id = m.id AND h.user_id = ?)';
 
     /** Mes conversations (comme client, et comme commerçant si j'ai un étal), la plus récente d'abord */
     public function index(Request $req): never
@@ -41,7 +43,7 @@ final class MessagesController
         );
         $out = [];
         foreach ($rows as $c) {
-            $last = Database::one('SELECT m.* FROM messages m WHERE m.conversation_id = ? AND ' . Messaging::VISIBLE . ' ORDER BY m.id DESC LIMIT 1', [$c['id']]);
+            $last = Database::one('SELECT m.* FROM messages m WHERE m.conversation_id = ? AND ' . Messaging::VISIBLE . self::NOT_HIDDEN . ' ORDER BY m.id DESC LIMIT 1', [$c['id'], $me]);
             if ($last === null) {
                 continue; // tout a expiré
             }
@@ -79,8 +81,8 @@ final class MessagesController
         $c = $this->participant($req);
         $after = Ids::tryDecode('msg', (string) $req->query('after', '')) ?? 0;
         $rows = Database::all(
-            'SELECT * FROM (SELECT m.* FROM messages m WHERE m.conversation_id = ? AND m.id > ? AND ' . Messaging::VISIBLE . ' ORDER BY m.id DESC LIMIT 200) x ORDER BY id',
-            [$c['id'], $after],
+            'SELECT * FROM (SELECT m.* FROM messages m WHERE m.conversation_id = ? AND m.id > ? AND ' . Messaging::VISIBLE . self::NOT_HIDDEN . ' ORDER BY m.id DESC LIMIT 200) x ORDER BY id',
+            [$c['id'], $after, $req->userId()],
         );
         $this->markRead($c, $req->userId());
         $fresh = Database::one('SELECT * FROM conversations WHERE id = ?', [$c['id']]);
@@ -157,6 +159,18 @@ final class MessagesController
         Response::ok($this->message(Database::one('SELECT * FROM messages WHERE id = ?', [$m['id']]), $req->userId(), Database::one('SELECT * FROM conversations WHERE id = ?', [$c['id']])));
     }
 
+    /** Supprimer un message « pour moi » (le mien ou celui de l'autre) : il reste chez l'autre personne */
+    public function hide(Request $req): never
+    {
+        $c = $this->participant($req);
+        $msgId = Ids::decode('msg', $req->params['message'] ?? null, 'MESSAGE_NOT_FOUND', 'Message introuvable.');
+        if (Database::value('SELECT id FROM messages WHERE id = ? AND conversation_id = ?', [$msgId, $c['id']]) === null) {
+            throw new HttpException(404, 'MESSAGE_NOT_FOUND', 'Message introuvable.');
+        }
+        Database::run('INSERT IGNORE INTO message_hidden (user_id, message_id, created_at) VALUES (?, ?, ?)', [$req->userId(), $msgId, Clock::now()]);
+        Response::ok(['hidden' => true, 'id' => Ids::encode('msg', $msgId)]);
+    }
+
     /** @return array{0: array, 1: array} conversation et message envoyé par moi, encore visible et non supprimé */
     private function ownMessage(Request $req): array
     {
@@ -194,10 +208,10 @@ final class MessagesController
         }
         $unread = (int) Database::value(
             'SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id
-             WHERE ' . Messaging::VISIBLE . ' AND m.sender_id <> ?
+             WHERE ' . Messaging::VISIBLE . self::NOT_HIDDEN . ' AND m.sender_id <> ?
                AND ((c.client_id = ? AND (c.client_read_at IS NULL OR m.created_at > c.client_read_at))
                  OR (c.stall_id = ? AND (c.merchant_read_at IS NULL OR m.created_at > c.merchant_read_at)))',
-            [$me, $me, $stallId],
+            [$me, $me, $me, $stallId],
         );
         $user = Database::one('SELECT role, merchant_welcome_pending FROM users WHERE id = ?', [$me]);
         Response::ok([
@@ -259,8 +273,8 @@ final class MessagesController
         $kept = Messaging::follows((int) $c['client_id'], (int) $c['stall_id']);
         $readAt = $asClient ? $c['client_read_at'] : $c['merchant_read_at'];
         $unread = (int) Database::value(
-            'SELECT COUNT(*) FROM messages m WHERE m.conversation_id = ? AND m.sender_id <> ? AND ' . Messaging::VISIBLE . ($readAt !== null ? ' AND m.created_at > ?' : ''),
-            $readAt !== null ? [$c['id'], $me, $readAt] : [$c['id'], $me],
+            'SELECT COUNT(*) FROM messages m WHERE m.conversation_id = ? AND m.sender_id <> ? AND ' . Messaging::VISIBLE . self::NOT_HIDDEN . ($readAt !== null ? ' AND m.created_at > ?' : ''),
+            $readAt !== null ? [$c['id'], $me, $me, $readAt] : [$c['id'], $me, $me],
         );
         $stallImage = Stalls::image($c['photo_path'], $c['photo_width'] === null ? null : (int) $c['photo_width'], $c['photo_height'] === null ? null : (int) $c['photo_height']);
         $merchant = $asClient ? null : Users::find((int) $c['merchant_id']);
@@ -270,6 +284,8 @@ final class MessagesController
             'my_role' => $asClient ? 'client' : 'merchant',
             'stall' => ['id' => Ids::encode('stl', $c['stall_id']), 'name' => $c['stall_name'], 'avatar' => $stallImage],
             // L'autre personne : l'étal pour le client, le client pour le commerçant (photo selon son choix)
+            // Profil de l'autre personne (présentation publique, sans email ni téléphone)
+            'other_user_id' => Ids::encode('usr', $asClient ? $c['merchant_id'] : $c['client_user_id']),
             'other' => $asClient
                 ? ['name' => $c['stall_name'], 'avatar' => $stallImage]
                 : ['name' => $c['client_name'], 'avatar' => Users::avatarFor(['id' => $c['client_user_id'], 'avatar_path' => $c['avatar_path'], 'avatar_visibility' => $c['avatar_visibility']], $merchant === null ? null : (int) $merchant['id'], true)],

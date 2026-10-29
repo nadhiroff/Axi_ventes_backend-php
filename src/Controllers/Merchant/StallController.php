@@ -172,6 +172,20 @@ final class StallController
         Response::ok(['listened' => true]);
     }
 
+    /** Supprimer un message vocal reçu d'un client (et son enregistrement) */
+    public function deleteVoiceMessage(Request $req): never
+    {
+        $stall = Merchant::stall($req);
+        $id = $req->id('vm', 'NOT_FOUND', 'Message introuvable.');
+        $path = Database::value('SELECT audio_path FROM voice_messages WHERE id = ? AND stall_id = ?', [$id, $stall['id']]);
+        if ($path === null) {
+            throw new \Axi\Core\HttpException(404, 'NOT_FOUND', 'Message introuvable.');
+        }
+        Database::run('DELETE FROM voice_messages WHERE id = ?', [$id]);
+        @unlink(BASE_PATH . '/storage/' . $path);
+        Response::ok(['deleted' => true]);
+    }
+
     /** Demande de visite d'un agent (vérification sur place, badge « vérifié ») */
     public function requestVisit(Request $req): never
     {

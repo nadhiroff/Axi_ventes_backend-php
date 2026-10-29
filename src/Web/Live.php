@@ -23,7 +23,8 @@ final class Live
                 (SELECT MAX(updated_at) FROM campaigns), (SELECT MAX(updated_at) FROM settings), (SELECT MAX(updated_at) FROM organizations),
                 (SELECT CONCAT(COUNT(*), MAX(resolved_at)) FROM disputes), (SELECT CONCAT(COUNT(*), MAX(decided_at)) FROM credits),
                 (SELECT CONCAT(COUNT(*), SUM(status = 'done')) FROM agent_visit_requests), (SELECT MAX(id) FROM payouts),
-                (SELECT CONCAT(COUNT(*), SUM(active)) FROM aisles), (SELECT CONCAT(COUNT(*), SUM(active)) FROM sites)
+                (SELECT CONCAT(COUNT(*), SUM(active)) FROM aisles), (SELECT CONCAT(COUNT(*), SUM(active)) FROM sites),
+                (SELECT CONCAT(COUNT(*), MAX(handled_at)) FROM reports)
              ) AS v",
         );
         return substr(md5((string) $row['v']), 0, 16);
@@ -36,7 +37,9 @@ final class Live
             "SELECT (SELECT COUNT(*) FROM merchant_applications WHERE status = 'pending') AS applications,
                     (SELECT COUNT(*) FROM disputes WHERE status = 'open') AS disputes,
                     (SELECT COUNT(*) FROM agent_visit_requests WHERE status IN ('new','scheduled')) AS visits,
-                    (SELECT COUNT(*) FROM stalls WHERE aisle_other IS NOT NULL OR site_other IS NOT NULL) AS proposals",
+                    (SELECT COUNT(*) FROM stalls WHERE aisle_other IS NOT NULL OR site_other IS NOT NULL) AS proposals,
+                    (SELECT COUNT(*) FROM reports WHERE status = 'open') AS reports,
+                    (SELECT COUNT(*) FROM credits WHERE status = 'new') AS credits",
         );
     }
 

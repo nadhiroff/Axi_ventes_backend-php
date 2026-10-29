@@ -14,6 +14,7 @@ use Axi\Controllers\Merchant\StallController;
 use Axi\Controllers\Merchant\TodayController;
 use Axi\Controllers\OrderController;
 use Axi\Controllers\PaymentController;
+use Axi\Controllers\ProfileController;
 use Axi\Controllers\SalesController;
 use Axi\Core\Request;
 use Axi\Core\Response;
@@ -69,6 +70,9 @@ return static function (Router $r): void {
     $r->patch('/v1/conversations/{id}/messages/{message}', [MessagesController::class, 'edit'], $user);
     $r->delete('/v1/conversations/{id}/messages/{message}', [MessagesController::class, 'delete'], $user);
     $r->post('/v1/conversations/{id}/read', [MessagesController::class, 'read'], $user);
+    $r->post('/v1/conversations/{id}/messages/{message}/hide', [MessagesController::class, 'hide'], $user);
+    $r->get('/v1/users/{id}/profile', [ProfileController::class, 'show'], $user);
+    $r->post('/v1/users/{id}/report', [ProfileController::class, 'report'], $user);
     $r->post('/v1/stalls/{id}/conversation', [MessagesController::class, 'openWithStall'], $user);
     $r->post('/v1/merchant/clients/{id}/conversation', [MessagesController::class, 'openWithClient'], $merchant);
     $r->get('/v1/notifications', [AccountController::class, 'notifications'], $user);
@@ -127,6 +131,7 @@ return static function (Router $r): void {
     $r->delete('/v1/merchant/products/{id}', [StallController::class, 'deleteProduct'], $merchant);
     $r->get('/v1/merchant/voice-messages', [StallController::class, 'voiceMessages'], $merchant);
     $r->post('/v1/merchant/voice-messages/{id}/listened', [StallController::class, 'markListened'], $merchant);
+    $r->delete('/v1/merchant/voice-messages/{id}', [StallController::class, 'deleteVoiceMessage'], $merchant);
     $r->get('/v1/merchant/today', [TodayController::class, 'today'], $merchant);
     $r->post('/v1/merchant/orders/{id}/ready', [TodayController::class, 'ready'], $merchant);
     $r->post('/v1/merchant/relocation/broadcast', [ClientsController::class, 'relocation'], $merchant);

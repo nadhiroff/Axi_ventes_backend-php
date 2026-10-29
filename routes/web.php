@@ -12,6 +12,7 @@ use Axi\Web\Controllers\Market;
 use Axi\Web\Controllers\Merchants;
 use Axi\Web\Controllers\Money;
 use Axi\Web\Controllers\Orders;
+use Axi\Web\Controllers\Reports;
 use Axi\Web\Controllers\Stats;
 use Axi\Web\Live;
 
@@ -52,6 +53,10 @@ return static function (Router $r): void {
     $r->post('/pro/commercants/{id}/abonnement', [Merchants::class, 'subscription']);
     $r->post('/pro/commercants/{id}/verser', [Merchants::class, 'payout']);
     $r->get('/pro/verifications', [Merchants::class, 'visits']);
+
+    $r->get('/pro/signalements', [Reports::class, 'index']);
+    $r->post('/pro/signalements/{id}/bloquer', [Reports::class, 'block']);
+    $r->post('/pro/signalements/{id}/classer', [Reports::class, 'dismiss']);
 
     $r->get('/pro/clients', [Clients::class, 'index']);
     $r->get('/pro/clients/{id}', [Clients::class, 'show']);

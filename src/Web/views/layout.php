@@ -7,9 +7,9 @@ use Axi\Web\WebAuth;
 $path = '/' . trim((string) preg_replace('#^.*?/pro#', '/pro', (string) parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH)), '/');
 $section = WebAuth::section($path);
 $isAxi = $user !== null && $user['partner_type'] === 'axi';
-$counts = $isAxi ? Live::counts() : ['applications' => 0, 'disputes' => 0, 'visits' => 0, 'proposals' => 0];
-$manageCount = (int) $counts['applications'] + (int) $counts['disputes'];
-$badgeFor = ['/pro/demandes' => (int) $counts['applications'], '/pro/commandes' => (int) $counts['disputes'], '/pro/commercants' => (int) $counts['visits'], '/pro/allees' => (int) $counts['proposals']];
+$counts = $isAxi ? Live::counts() : ['applications' => 0, 'disputes' => 0, 'visits' => 0, 'proposals' => 0, 'reports' => 0, 'credits' => 0];
+$manageCount = (int) $counts['applications'] + (int) $counts['disputes'] + (int) $counts['reports'];
+$badgeFor = ['/pro/demandes' => (int) $counts['applications'], '/pro/commandes' => (int) $counts['disputes'], '/pro/commercants' => (int) $counts['visits'], '/pro/allees' => (int) $counts['proposals'], '/pro/signalements' => (int) $counts['reports']];
 $manageOn = in_array($section, array_column(WebAuth::MANAGE, 0), true);
 $tabs = null;
 foreach (WebAuth::TABS as $group) {
