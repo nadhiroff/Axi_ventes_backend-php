@@ -1,0 +1,7 @@
+# Installation dans un sous-dossier d'Apache (ex. /var/www/html/Axi_ventes_backend-php) :
+# tout est renvoyé vers public/, donc config/, src/, .git/... ne sont jamais servis.
+Options -Indexes
+RewriteEngine On
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+RewriteCond %{REQUEST_URI} !/public/
+RewriteRule ^(.*)$ public/$1 [L]
