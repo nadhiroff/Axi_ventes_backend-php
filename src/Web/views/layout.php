@@ -102,6 +102,8 @@ dl{display:grid;grid-template-columns:minmax(110px,auto) 1fr;gap:10px 18px;margi
 .toast{display:flex;gap:12px;align-items:flex-start;background:var(--surface);color:var(--ink);border:1px solid var(--border);border-left:5px solid var(--ok);border-radius:14px;padding:14px 16px;box-shadow:0 12px 32px rgba(0,0,0,.16);animation:in .2s ease-out}
 .toast.err{border-left-color:var(--danger)}.toast.info{border-left-color:var(--brand)}.toast .ic{font-size:18px;line-height:1.3}.toast .x{margin-left:auto;background:none;border:0;color:var(--muted);font-size:22px;cursor:pointer;line-height:1;padding:0 2px}
 .toast.out{opacity:0;transform:translateY(-6px);transition:all .25s}
+.toast{position:relative;overflow:hidden;cursor:pointer}.toast::after{content:"";position:absolute;left:0;bottom:0;height:3px;width:100%;background:currentColor;opacity:.25;transform-origin:left;animation:countdown 4s linear forwards}
+@keyframes countdown{to{transform:scaleX(0)}}
 @keyframes in{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
 .modal{position:fixed;inset:0;z-index:100;display:none;align-items:center;justify-content:center;padding:16px;background:rgba(12,10,9,.55);backdrop-filter:blur(2px)}
 .modal.open{display:flex}.dialog{background:var(--surface);color:var(--ink);border-radius:20px;max-width:440px;width:100%;padding:26px;box-shadow:0 24px 64px rgba(0,0,0,.3);animation:in .18s ease-out}
@@ -184,7 +186,8 @@ dl{display:grid;grid-template-columns:minmax(110px,auto) 1fr;gap:10px 18px;margi
 
   /* Notifications (au lieu des alertes du navigateur) */
   function close(t) { t.classList.add('out'); setTimeout(function () { t.remove(); }, 260); }
-  function autoClose(t) { setTimeout(function () { close(t); }, 6000); }
+  /* Chaque notification disparaît seule après 4 secondes (barre de temps en bas), ou dès qu'on la touche */
+  function autoClose(t) { setTimeout(function () { close(t); }, 4000); }
   function toast(message, type) {
     var t = document.createElement('div');
     t.className = 'toast ' + (type || 'ok');
@@ -239,8 +242,8 @@ dl{display:grid;grid-template-columns:minmax(110px,auto) 1fr;gap:10px 18px;margi
 
   /* Menus déroulants, menu mobile, fermeture des notifications */
   document.addEventListener('click', function (e) {
-    var x = e.target.closest('.toast .x');
-    if (x) close(x.parentNode);
+    var toastEl = e.target.closest('.toast');
+    if (toastEl) close(toastEl);
     var t = e.target.closest('[data-drop]');
     $$('.drop.open').forEach(function (d) { if (!t || d !== t.parentNode) d.classList.remove('open'); });
     if (t) t.parentNode.classList.toggle('open');
@@ -288,7 +291,14 @@ dl{display:grid;grid-template-columns:minmax(110px,auto) 1fr;gap:10px 18px;margi
       }).then(function (j) {
         if (!j || j.v === version) return;
         version = j.v;
-        if (busy()) { if (!waiting) { waiting = true; $('#live').classList.add('show'); } return; }
+        if (busy()) {
+          if (!waiting) {
+            waiting = true;
+            $('#live').classList.add('show');
+            setTimeout(function () { $('#live').classList.remove('show'); waiting = false; }, 15000);
+          }
+          return;
+        }
         refresh(false);
       }).catch(function () {});
     }, 8000);
