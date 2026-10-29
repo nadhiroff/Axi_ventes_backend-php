@@ -1,5 +1,7 @@
 -- Axi : schéma de la base (étape 1 : authentification)
--- Exécution : mysql -u admin -p < database/schema.sql
+-- Exécution : mysql -u admin -p < database/migrations/001_auth.sql
+
+SET NAMES utf8mb4;
 
 CREATE DATABASE IF NOT EXISTS axi CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE axi;

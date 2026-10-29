@@ -20,7 +20,7 @@ final class AuthToken
     public static function findActive(string $tokenHash, string $now): ?array
     {
         return Database::run(
-            'SELECT t.id AS token_id, u.id, u.phone, u.name, u.role, u.lang, u.status
+            'SELECT t.id AS token_id, u.id, u.phone, u.name, u.org_name, u.role, u.lang, u.status
              FROM auth_tokens t JOIN users u ON u.id = t.user_id
              WHERE t.token_hash = ? AND t.revoked_at IS NULL AND t.expires_at > ?
              LIMIT 1',

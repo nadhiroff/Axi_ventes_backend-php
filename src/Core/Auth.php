@@ -14,12 +14,7 @@ final class Auth
         if ($token === null) {
             throw new HttpException(401, 'UNAUTHENTICATED', 'Connexion requise');
         }
-        // Rejette les jetons mal formés sans toucher à la base
-        if (!preg_match('/^[a-f0-9]{64}$/', $token)) {
-            throw new HttpException(401, 'TOKEN_INVALID', 'Session invalide ou expirée');
-        }
-
-        $row = AuthToken::findActive(self::hashToken($token), Clock::now());
+        $row = self::resolve($token);
         if ($row === null) {
             throw new HttpException(401, 'TOKEN_INVALID', 'Session invalide ou expirée');
         }
@@ -29,11 +24,17 @@ final class Auth
         if ($roles && !in_array($row['role'], $roles, true)) {
             throw new HttpException(403, 'FORBIDDEN', 'Accès non autorisé pour ce profil');
         }
+        self::login($request, $row);
+    }
 
-        AuthToken::touch((int) $row['token_id'], self::tokenTtlSeconds());
-
-        $request->tokenId = (int) $row['token_id'];
-        $request->user = $row;
+    /** Pour les routes publiques : reconnaît l'utilisateur s'il envoie un jeton valide, sinon reste anonyme. */
+    public static function attempt(Request $request): void
+    {
+        $token = $request->bearerToken();
+        $row = $token === null ? null : self::resolve($token);
+        if ($row !== null && $row['status'] === 'active') {
+            self::login($request, $row);
+        }
     }
 
     /** Crée un jeton de session et renvoie [jeton en clair, date d'expiration]. */
@@ -48,6 +49,22 @@ final class Auth
     public static function hashToken(string $token): string
     {
         return hash('sha256', $token);
+    }
+
+    private static function resolve(string $token): ?array
+    {
+        // Rejette les jetons mal formés sans toucher à la base
+        if (!preg_match('/^[a-f0-9]{64}$/', $token)) {
+            return null;
+        }
+        return AuthToken::findActive(self::hashToken($token), Clock::now());
+    }
+
+    private static function login(Request $request, array $row): void
+    {
+        AuthToken::touch((int) $row['token_id'], self::tokenTtlSeconds());
+        $request->tokenId = (int) $row['token_id'];
+        $request->user = $row;
     }
 
     private static function tokenTtlSeconds(): int
