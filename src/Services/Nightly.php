@@ -4,23 +4,107 @@ declare(strict_types=1);
 namespace Axi\Services;
 
 use Axi\Core\Clock;
-use Axi\Core\Config;
 use Axi\Core\Database;
-use Axi\Services\Payment\Payments;
+use Axi\Services\Payment\Escrow;
 
-/** Tâches planifiées : prix médians d'Axi Pro, libération automatique, ménage. */
+/**
+ * Tâches planifiées (cron/run.php ou /v1/internal/cron?key=) : vérification des paiements en attente,
+ * relance de paiement, annulation des commandes jamais payées, libération automatique, rappels
+ * (commande en cours, abonnement à renouveler), prix médians d'Axi Pro, ménage.
+ */
 final class Nightly
 {
     /** @return array<string, int> résumé de ce qui a été fait */
     public static function run(): array
     {
         return [
-            'median_prices' => self::medianPrices(),
-            'released_orders' => self::autoRelease(),
+            'checked_payments' => self::checkPending(),
+            'payment_reminders' => self::paymentReminders(),
             'cancelled_unpaid' => self::cancelUnpaid(),
+            'released_orders' => self::autoRelease(),
+            'subscription_reminders' => self::subscriptionReminders(),
+            'median_prices' => self::medianPrices(),
             'deleted_codes' => Database::run('DELETE FROM email_codes WHERE created_at < ?', [Clock::now(-2 * 86400)])->rowCount(),
-            'deleted_login_failures' => Database::run('DELETE FROM login_failures WHERE created_at < ?', [Clock::now(-86400)])->rowCount(),
         ];
+    }
+
+    /** Paiements en attente : statut redemandé à la passerelle (si un webhook s'est perdu) */
+    private static function checkPending(): int
+    {
+        $ids = array_column(Database::all("SELECT id FROM payments WHERE status = 'pending' AND payment_url IS NOT NULL AND created_at > ? LIMIT 200", [Clock::now(-48 * 3600)]), 'id');
+        foreach ($ids as $id) {
+            Escrow::refresh((int) $id);
+        }
+        return count($ids);
+    }
+
+    /** Relance par email (et notification) d'une commande non payée, une seule fois */
+    private static function paymentReminders(): int
+    {
+        $rows = Database::all(
+            "SELECT id, client_id, total FROM orders WHERE status = 'awaiting_payment' AND reminder_sent_at IS NULL AND created_at < ? AND created_at > ?",
+            [Clock::now(-60 * Settings::int('payment_reminder_minutes')), Clock::now(-3600 * Settings::int('unpaid_expiry_hours'))],
+        );
+        foreach ($rows as $o) {
+            Database::run('UPDATE orders SET reminder_sent_at = ? WHERE id = ?', [Clock::now(), $o['id']]);
+            Notifier::send((int) $o['client_id'], 'reminder', 'Votre commande attend son paiement', 'La commande cmd_' . $o['id'] . ' (' . Escrow::fcfa((int) $o['total']) . ') n\'est pas encore payée. Ouvrez « Mes commandes » pour la payer ou l\'annuler.', ['order_id' => 'cmd_' . $o['id']]);
+        }
+        return count($rows);
+    }
+
+    /** Commandes jamais payées : annulées après le délai configuré (rien n'a été débité) */
+    private static function cancelUnpaid(): int
+    {
+        $rows = Database::all("SELECT o.id, p.id AS payment_id FROM orders o JOIN payments p ON p.order_id = o.id WHERE o.status = 'awaiting_payment' AND o.created_at < ?", [Clock::now(-3600 * Settings::int('unpaid_expiry_hours'))]);
+        $n = 0;
+        foreach ($rows as $row) {
+            // Dernière vérification : un paiement validé entre-temps n'est jamais annulé
+            Escrow::refresh((int) $row['payment_id']);
+            $done = Database::transaction(static function () use ($row): bool {
+                if (Database::run("UPDATE orders SET status = 'cancelled', cancelled_at = ? WHERE id = ? AND status = 'awaiting_payment'", [Clock::now(), $row['id']])->rowCount() === 0) {
+                    return false;
+                }
+                Database::run("UPDATE order_stalls SET status = 'cancelled' WHERE order_id = ?", [$row['id']]);
+                Database::run("UPDATE payments SET status = 'expired' WHERE id = ? AND status = 'pending'", [$row['payment_id']]);
+                Escrow::log('order_expired', ['payment' => $row['payment_id'], 'order' => $row['id']], 'system', null, 'pending', 'expired');
+                return true;
+            });
+            $n += (int) $done;
+        }
+        return $n;
+    }
+
+    /** Remise au coursier sans confirmation ni litige après N jours : réception présumée, argent libéré */
+    private static function autoRelease(): int
+    {
+        $ids = array_column(Database::all(
+            "SELECT o.id FROM orders o WHERE o.status = 'on_the_way'
+               AND (SELECT MAX(os.picked_up_at) FROM order_stalls os WHERE os.order_id = o.id) < ?",
+            [Clock::now(-86400 * Settings::int('auto_release_days'))],
+        ), 'id');
+        foreach ($ids as $id) {
+            Escrow::confirmReceipt((int) $id, 'system', null);
+        }
+        return count($ids);
+    }
+
+    /** Abonnement qui expire dans 3 jours : un rappel par jour au commerçant */
+    private static function subscriptionReminders(): int
+    {
+        $rows = Database::all(
+            "SELECT s.stall_id, MAX(s.ends_on) AS ends_on, st.user_id FROM subscriptions s JOIN stalls st ON st.id = s.stall_id
+             WHERE s.status = 'active' AND s.paid_by = 'merchant' GROUP BY s.stall_id, st.user_id HAVING ends_on BETWEEN ? AND ?",
+            [Clock::localDate(), date('Y-m-d', strtotime(Clock::localDate() . ' +3 days'))],
+        );
+        $n = 0;
+        foreach ($rows as $r) {
+            $already = Database::value("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'reminder' AND title = 'Abonnement à renouveler' AND created_at > ?", [$r['user_id'], Clock::now(-20 * 3600)]);
+            if ($already === null) {
+                Notifier::send((int) $r['user_id'], 'reminder', 'Abonnement à renouveler', 'Votre abonnement Axi se termine le ' . date('d/m/Y', strtotime($r['ends_on'])) . '. Renouvelez-le dans « Mon argent » pour garder votre étal en ligne.');
+                $n++;
+            }
+        }
+        return $n;
     }
 
     /** MySQL n'a pas de MEDIAN : pour chaque (référence, site), un prix par étal, trié, valeur du milieu */
@@ -49,39 +133,5 @@ final class Nightly
             );
         }
         return count($groups);
-    }
-
-    /** Commande remise au coursier sans confirmation du client après N jours : réception présumée, argent libéré */
-    private static function autoRelease(): int
-    {
-        $ids = array_column(Database::all(
-            "SELECT o.id FROM orders o WHERE o.status = 'on_the_way'
-               AND (SELECT MAX(os.picked_up_at) FROM order_stalls os WHERE os.order_id = o.id) < ?",
-            [Clock::now(-86400 * (int) Config::get('escrow.auto_release_days', 7))],
-        ), 'id');
-        foreach ($ids as $id) {
-            Payments::release((int) $id);
-        }
-        return count($ids);
-    }
-
-    /** Commandes jamais payées : annulées après 24 h (rien n'a été débité) */
-    private static function cancelUnpaid(): int
-    {
-        $ids = array_column(Database::all(
-            "SELECT id FROM orders WHERE status = 'awaiting_payment' AND created_at < ?",
-            [Clock::now(-3600 * (int) Config::get('escrow.unpaid_expiry_hours', 24))],
-        ), 'id');
-        foreach ($ids as $id) {
-            Payments::refresh((int) $id);
-            Database::transaction(static function () use ($id): void {
-                $n = Database::run("UPDATE orders SET status = 'cancelled' WHERE id = ? AND status = 'awaiting_payment'", [$id])->rowCount();
-                if ($n > 0) {
-                    Database::run("UPDATE order_stalls SET status = 'cancelled' WHERE order_id = ?", [$id]);
-                    Database::run("UPDATE payments SET status = 'failed' WHERE order_id = ? AND status = 'pending'", [$id]);
-                }
-            });
-        }
-        return count($ids);
     }
 }
