@@ -12,7 +12,7 @@
 SET NAMES utf8mb4;
 SET time_zone = '+00:00';
 SET FOREIGN_KEY_CHECKS = 0;
-DROP TABLE IF EXISTS messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
+DROP TABLE IF EXISTS stall_photos, messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
 SET FOREIGN_KEY_CHECKS = 1;
 
 CREATE TABLE schema_migrations (
@@ -839,6 +839,52 @@ ALTER TABLE messages
   ADD COLUMN deleted_at DATETIME NULL AFTER edited_at;
 
 INSERT INTO schema_migrations (file, applied_at) VALUES ('003_messagerie_lu_en_ligne.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 004_reponses_galerie_devises.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 004 : réponse à un message, galerie de photos de l'étal, taux de change (euro, dollar).
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+
+ALTER TABLE messages ADD COLUMN reply_to_id INT UNSIGNED NULL AFTER file_height;
+
+-- Photos supplémentaires de l'étal (la première photo reste stalls.photo_path), 8 au plus
+CREATE TABLE stall_photos (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  stall_id INT UNSIGNED NOT NULL,
+  path VARCHAR(255) NOT NULL,
+  width SMALLINT UNSIGNED NOT NULL,
+  height SMALLINT UNSIGNED NOT NULL,
+  position SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL,
+  KEY idx_stall_photos (stall_id, position),
+  CONSTRAINT fk_stall_photos_stall FOREIGN KEY (stall_id) REFERENCES stalls(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Taux réels : l'euro est fixe (1 € = 655,957 F CFA, parité officielle) ; le dollar est relu
+-- automatiquement (open.er-api.com) au plus toutes les 12 h. Valeur de départ, remplacée au premier appel.
+INSERT INTO settings (k, v, label, type) VALUES
+  ('rate_xof_per_usd', '600', 'Taux du dollar en F CFA (mis à jour automatiquement)', 'text'),
+  ('rate_updated_at', '2000-01-01 00:00:00', 'Dernière mise à jour du taux du dollar (UTC)', 'text');
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('004_reponses_galerie_devises.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 005_coches_par_message.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 005 : coches ✓✓ fiables — dernier message reçu et lu de chaque côté (par numéro, pas par heure).
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+ALTER TABLE conversations
+  ADD COLUMN client_read_msg_id INT UNSIGNED NOT NULL DEFAULT 0 AFTER merchant_delivered_at,
+  ADD COLUMN merchant_read_msg_id INT UNSIGNED NOT NULL DEFAULT 0 AFTER client_read_msg_id,
+  ADD COLUMN client_delivered_msg_id INT UNSIGNED NOT NULL DEFAULT 0 AFTER merchant_read_msg_id,
+  ADD COLUMN merchant_delivered_msg_id INT UNSIGNED NOT NULL DEFAULT 0 AFTER client_delivered_msg_id;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('005_coches_par_message.sql', UTC_TIMESTAMP());
 
 -- -----------------------------------------------------------------------------
 -- Comptes de test (un par rôle, et un par type de partenaire). Changer les mots de passe en production.

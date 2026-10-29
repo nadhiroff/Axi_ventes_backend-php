@@ -32,7 +32,7 @@ final class AccountController
         $body = $req->all();
         $in = Validator::validate($body, [
             'theme' => 'in:system,light,dark',
-            'currency' => 'in:XOF',
+            'currency' => 'in:XOF,EUR,USD',
             'date_format' => 'in:dd/mm/yyyy,yyyy-mm-dd',
             'default_address' => 'string|max:255',
             'preferred_point_id' => 'string|max:20',

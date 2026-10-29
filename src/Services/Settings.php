@@ -91,6 +91,12 @@ final class Settings
         self::$cache = null;
     }
 
+    /** Relire la table au prochain accès (valeur changée par le code pendant la requête) */
+    public static function forget(): void
+    {
+        self::$cache = null;
+    }
+
     private static function raw(string $key): string
     {
         return (string) (self::all()[$key]['v'] ?? throw new \LogicException("Réglage $key absent de la table settings"));

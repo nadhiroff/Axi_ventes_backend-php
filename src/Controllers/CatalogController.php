@@ -222,4 +222,10 @@ final class CatalogController
         Database::run('UPDATE campaigns SET clicks = clicks + 1 WHERE id = ? AND status = \'active\'', [$id]);
         Response::ok(['counted' => true]);
     }
+
+    /** Taux de change pour afficher les prix en euro ou en dollar (paiement toujours en F CFA) */
+    public function rates(Request $req): never
+    {
+        Response::ok(\Axi\Services\Rates::current(), 200, 3600);
+    }
 }

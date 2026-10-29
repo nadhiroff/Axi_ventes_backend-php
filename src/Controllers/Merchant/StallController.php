@@ -24,6 +24,8 @@ use Axi\Support\Stalls;
  */
 final class StallController
 {
+    private const GALLERY_MAX = 8;
+
     /** Listes pour le formulaire : sites et allées actifs */
     public function options(Request $req): never
     {
@@ -70,6 +72,39 @@ final class StallController
         $file = $req->file('photo') ?? Validator::fail(['photo' => 'Choisissez une photo.'], ['photo' => 'Photo']);
         $photo = Uploads::photo($file);
         Database::updateById('stalls', (int) $stall['id'], ['photo_path' => $photo['path'], 'photo_width' => $photo['width'], 'photo_height' => $photo['height'], 'updated_at' => Clock::now()]);
+        Response::ok($this->payload($req));
+    }
+
+    /** Galerie de l'étal : photos[] en plus de la photo principale (8 au plus), que les clients font défiler */
+    public function addGalleryPhotos(Request $req): never
+    {
+        $stall = Merchant::stall($req);
+        $existing = (int) Database::value('SELECT COUNT(*) FROM stall_photos WHERE stall_id = ?', [$stall['id']]);
+        $files = $req->files('photos', 'photo', self::GALLERY_MAX);
+        if ($files === []) {
+            Validator::fail(['photos' => 'Choisissez au moins une photo.'], ['photos' => 'Photos']);
+        }
+        if ($existing + count($files) > self::GALLERY_MAX) {
+            throw new \Axi\Core\HttpException(422, 'VALIDATION_ERROR', self::GALLERY_MAX . ' photos maximum dans la galerie de l\'étal.');
+        }
+        foreach ($files as $i => $file) {
+            $photo = Uploads::photo($file);
+            Database::run('INSERT INTO stall_photos (stall_id, path, width, height, position, created_at) VALUES (?, ?, ?, ?, ?, ?)', [$stall['id'], $photo['path'], $photo['width'], $photo['height'], $existing + $i, Clock::now()]);
+        }
+        Database::run('UPDATE stalls SET updated_at = ? WHERE id = ?', [Clock::now(), $stall['id']]);
+        Response::ok($this->payload($req));
+    }
+
+    public function removeGalleryPhoto(Request $req): never
+    {
+        $stall = Merchant::stall($req);
+        $ids = array_column(Database::all('SELECT id FROM stall_photos WHERE stall_id = ? ORDER BY position, id', [$stall['id']]), 'id');
+        $index = (int) ($req->params['index'] ?? -1);
+        if (!isset($ids[$index])) {
+            throw new \Axi\Core\HttpException(404, 'NOT_FOUND', 'Photo introuvable.');
+        }
+        Database::run('DELETE FROM stall_photos WHERE id = ?', [$ids[$index]]);
+        Database::run('UPDATE stalls SET updated_at = ? WHERE id = ?', [Clock::now(), $stall['id']]);
         Response::ok($this->payload($req));
     }
 

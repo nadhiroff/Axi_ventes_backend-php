@@ -74,7 +74,12 @@ final class Stalls
     {
         $followed = $viewerId !== null
             && Database::value('SELECT 1 FROM stall_follows WHERE user_id = ? AND stall_id = ?', [$viewerId, $s['id']]) !== null;
+        $gallery = array_map(static fn (array $p): array => self::image($p['path'], (int) $p['width'], (int) $p['height']), Database::all('SELECT * FROM stall_photos WHERE stall_id = ? ORDER BY position, id', [$s['id']]));
         return self::summary($s) + [
+            // Photos à faire défiler : la photo principale puis la galerie
+            'photos' => array_values(array_filter([self::summary($s)['avatar'], ...$gallery])),
+            'gallery_count' => count($gallery),
+            'followers_count' => (int) Database::value('SELECT COUNT(*) FROM stall_follows WHERE stall_id = ?', [$s['id']]),
             'owner_display_name' => $s['owner_name'],
             'verification' => $s['verified_at'] === null ? null : ['by' => 'agent', 'verified_at' => Clock::iso($s['verified_at'])],
             'pay_on_delivery' => (bool) $s['pay_on_delivery'],
