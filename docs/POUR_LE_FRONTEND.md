@@ -64,6 +64,10 @@ selfie, stall_photo`. `409 APPLICATION_PENDING` si une demande attend déjà. Un
 | `POST /v1/stalls/{stl_…}/conversation` · `POST /v1/merchant/clients/{cli_…}/conversation` | ouvrir ou retrouver une conversation |
 | `GET /v1/conversations/{conv_…}/messages?after=msg_…` | messages visibles (marque comme lu) ; ETag : 304 si rien de neuf |
 | `POST /v1/conversations/{conv_…}/messages` | JSON `{ body }` ou multipart `photo` / `audio` ; 20 par minute au plus |
+| `PATCH /v1/conversations/{conv_…}/messages/{msg_…}` `{ body }` · `DELETE …` | modifier (texte) ou supprimer pour tout le monde SON message |
+
+Mes messages : `status` `sent` (✓), `delivered` (✓✓ : application de l'autre ouverte), `read` (✓✓ bleu) ; `edited`, `deleted`.
+Conversation : `other_online` (application ouverte il y a moins d'une minute), `other_last_seen_at`.
 
 Messages effacés 24 h après l'envoi (`message_ttl_hours`), sauf si le client suit l'étal ; s'il arrête, effacement 24 h plus tard.
 

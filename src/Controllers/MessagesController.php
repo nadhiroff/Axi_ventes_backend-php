@@ -83,8 +83,9 @@ final class MessagesController
             [$c['id'], $after],
         );
         $this->markRead($c, $req->userId());
+        $fresh = Database::one('SELECT * FROM conversations WHERE id = ?', [$c['id']]);
         Response::ok($this->conversation($c, $req->userId()) + [
-            'messages' => array_map(fn (array $m): array => $this->message($m, $req->userId()), $rows),
+            'messages' => array_map(fn (array $m): array => $this->message($m, $req->userId(), $fresh), $rows),
         ]);
     }
 
@@ -119,7 +120,48 @@ final class MessagesController
             Database::run("UPDATE conversations SET last_message_at = ?, $mine = ? WHERE id = ?", [$now, $now, $c['id']]);
             return $id;
         });
-        Response::ok($this->message(Database::one('SELECT * FROM messages WHERE id = ?', [$id]), $me), 201);
+        Response::ok($this->message(Database::one('SELECT * FROM messages WHERE id = ?', [$id]), $me, Database::one('SELECT * FROM conversations WHERE id = ?', [$c['id']])), 201);
+    }
+
+    /** Modifier son propre message texte : { body } ; « modifié » est affiché à côté de l'heure */
+    public function edit(Request $req): never
+    {
+        [$c, $m] = $this->ownMessage($req);
+        if ($m['kind'] !== 'text') {
+            throw new HttpException(422, 'NOT_EDITABLE', 'Seuls les messages écrits peuvent être modifiés.');
+        }
+        $body = trim((string) (Validator::validate($req->all(), ['body' => 'required|string|max:2000'], ['body' => 'Message'])['body'] ?? ''));
+        if ($body === '') {
+            Validator::fail(['body' => 'Écrivez un message.'], ['body' => 'Message']);
+        }
+        Database::run('UPDATE messages SET body = ?, edited_at = ? WHERE id = ?', [$body, Clock::now(), $m['id']]);
+        Response::ok($this->message(Database::one('SELECT * FROM messages WHERE id = ?', [$m['id']]), $req->userId(), Database::one('SELECT * FROM conversations WHERE id = ?', [$c['id']])));
+    }
+
+    /** Supprimer son propre message pour tout le monde : « Ce message a été supprimé » reste affiché */
+    public function delete(Request $req): never
+    {
+        [$c, $m] = $this->ownMessage($req);
+        if ($m['kind'] === 'voice' && $m['file_path'] !== null) {
+            @unlink(BASE_PATH . '/storage/' . $m['file_path']);
+        }
+        Database::run('UPDATE messages SET body = NULL, file_path = NULL, deleted_at = ? WHERE id = ?', [Clock::now(), $m['id']]);
+        Response::ok($this->message(Database::one('SELECT * FROM messages WHERE id = ?', [$m['id']]), $req->userId(), Database::one('SELECT * FROM conversations WHERE id = ?', [$c['id']])));
+    }
+
+    /** @return array{0: array, 1: array} conversation et message envoyé par moi, encore visible et non supprimé */
+    private function ownMessage(Request $req): array
+    {
+        $c = $this->participant($req);
+        $msgId = Ids::decode('msg', $req->params['message'] ?? null, 'MESSAGE_NOT_FOUND', 'Message introuvable.');
+        $m = Database::one('SELECT m.* FROM messages m WHERE m.id = ? AND m.conversation_id = ? AND ' . Messaging::VISIBLE, [$msgId, $c['id']]);
+        if ($m === null || $m['deleted_at'] !== null) {
+            throw new HttpException(404, 'MESSAGE_NOT_FOUND', 'Message introuvable.');
+        }
+        if ((int) $m['sender_id'] !== $req->userId()) {
+            throw new HttpException(403, 'FORBIDDEN', 'Vous ne pouvez modifier ou supprimer que vos propres messages.');
+        }
+        return [$c, $m];
     }
 
     public function read(Request $req): never
@@ -134,6 +176,13 @@ final class MessagesController
     {
         $me = $req->userId();
         $stallId = $this->ownStallId($me) ?? 0;
+        // L'application est ouverte : « en ligne », et les messages reçus passent à ✓✓ chez l'expéditeur
+        $now = Clock::now();
+        Database::run('UPDATE users SET last_seen_at = ? WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)', [$now, $me, Clock::now(-20)]);
+        Database::run('UPDATE conversations SET client_delivered_at = ? WHERE client_id = ? AND last_message_at IS NOT NULL AND (client_delivered_at IS NULL OR client_delivered_at < last_message_at)', [$now, $me]);
+        if ($stallId > 0) {
+            Database::run('UPDATE conversations SET merchant_delivered_at = ? WHERE stall_id = ? AND last_message_at IS NOT NULL AND (merchant_delivered_at IS NULL OR merchant_delivered_at < last_message_at)', [$now, $stallId]);
+        }
         $unread = (int) Database::value(
             'SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id
              WHERE ' . Messaging::VISIBLE . ' AND m.sender_id <> ?
@@ -176,8 +225,10 @@ final class MessagesController
 
     private function markRead(array $c, int $me): void
     {
-        $column = (int) $c['client_id'] === $me ? 'client_read_at' : 'merchant_read_at';
-        Database::run("UPDATE conversations SET $column = ? WHERE id = ?", [Clock::now(), $c['id']]);
+        $side = (int) $c['client_id'] === $me ? 'client' : 'merchant';
+        $now = Clock::now();
+        Database::run("UPDATE conversations SET {$side}_read_at = ?, {$side}_delivered_at = ? WHERE id = ?", [$now, $now, $c['id']]);
+        Database::run('UPDATE users SET last_seen_at = ? WHERE id = ?', [$now, $me]);
     }
 
     /** En-tête d'une conversation, vu par $me */
@@ -203,6 +254,7 @@ final class MessagesController
         );
         $stallImage = Stalls::image($c['photo_path'], $c['photo_width'] === null ? null : (int) $c['photo_width'], $c['photo_height'] === null ? null : (int) $c['photo_height']);
         $merchant = $asClient ? null : Users::find((int) $c['merchant_id']);
+        $otherSeen = Database::value('SELECT last_seen_at FROM users WHERE id = ?', [$asClient ? $c['merchant_id'] : $c['client_id']]);
         return [
             'id' => Ids::encode('conv', $c['id']),
             'my_role' => $asClient ? 'client' : 'merchant',
@@ -211,6 +263,9 @@ final class MessagesController
             'other' => $asClient
                 ? ['name' => $c['stall_name'], 'avatar' => $stallImage]
                 : ['name' => $c['client_name'], 'avatar' => Users::avatarFor(['id' => $c['client_user_id'], 'avatar_path' => $c['avatar_path'], 'avatar_visibility' => $c['avatar_visibility']], $merchant === null ? null : (int) $merchant['id'], true)],
+            // « En ligne » : application ouverte il y a moins d'une minute ; sinon « vu à … »
+            'other_online' => $otherSeen !== null && strtotime($otherSeen . ' UTC') > time() - 60,
+            'other_last_seen_at' => Clock::iso($otherSeen),
             'kept' => $kept,
             'retention_note' => $kept
                 ? 'Messages gardés : ' . ($asClient ? 'vous suivez' : 'le client suit') . ' cet étal.'
@@ -218,22 +273,38 @@ final class MessagesController
             'unread_count' => $unread,
             'last_message' => $last === null ? null : [
                 'kind' => $last['kind'],
-                'preview' => match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', default => mb_substr((string) $last['body'], 0, 80) },
+                'preview' => $last['deleted_at'] !== null ? '🚫 Message supprimé' : match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', default => mb_substr((string) $last['body'], 0, 80) },
                 'mine' => (int) $last['sender_id'] === $me,
                 'created_at' => Clock::iso($last['created_at']),
             ],
         ];
     }
 
-    private function message(array $m, int $me): array
+    /**
+     * Message vu par $me. Pour ses propres messages, « status » comme WhatsApp :
+     * sent (✓ reçu par Axi), delivered (✓✓ arrivé sur le téléphone de l'autre), read (✓✓ bleu, conversation ouverte).
+     */
+    private function message(array $m, int $me, array $c): array
     {
+        $mine = (int) $m['sender_id'] === $me;
+        $otherSide = (int) $c['client_id'] === $me ? 'merchant' : 'client';
+        $readAt = $c[$otherSide . '_read_at'];
+        $deliveredAt = $c[$otherSide . '_delivered_at'];
+        $deleted = $m['deleted_at'] !== null;
         return [
             'id' => Ids::encode('msg', $m['id']),
-            'mine' => (int) $m['sender_id'] === $me,
+            'mine' => $mine,
+            'status' => !$mine ? null : match (true) {
+                $readAt !== null && $readAt > $m['created_at'] => 'read',
+                $deliveredAt !== null && $deliveredAt > $m['created_at'] => 'delivered',
+                default => 'sent',
+            },
+            'edited' => $m['edited_at'] !== null && !$deleted,
+            'deleted' => $deleted,
             'kind' => $m['kind'],
             'body' => $m['body'],
-            'image' => $m['kind'] === 'photo' ? Stalls::image($m['file_path'], $m['file_width'] === null ? null : (int) $m['file_width'], $m['file_height'] === null ? null : (int) $m['file_height']) : null,
-            'audio_url' => $m['kind'] === 'voice' ? SignedUrl::make('/v1/media/audio', ['p' => $m['file_path']], 86400) : null,
+            'image' => $deleted ? null : ($m['kind'] === 'photo' ? Stalls::image($m['file_path'], $m['file_width'] === null ? null : (int) $m['file_width'], $m['file_height'] === null ? null : (int) $m['file_height']) : null),
+            'audio_url' => !$deleted && $m['kind'] === 'voice' ? SignedUrl::make('/v1/media/audio', ['p' => $m['file_path']], 86400) : null,
             'created_at' => Clock::iso($m['created_at']),
             'expires_at' => Clock::iso($m['expires_at']),
         ];
