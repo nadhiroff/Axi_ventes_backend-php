@@ -34,7 +34,7 @@ check() { # libellé code_attendu réponse condition_supplémentaire
 
 echo "API : $API   compte de test : $EMAIL"
 
-check "1. Inscription" 201 "$(call POST /v1/auth/register "{\"first_name\":\"Test\",\"last_name\":\"Fumée\",\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"phone\":\"$PHONE\"}")" \
+check "1. Inscription" 201 "$(call POST /v1/auth/register "{\"first_name\":\"Test\",\"last_name\":\"Fumée\",\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"phone\":\"$PHONE\",\"profile\":\"client\"}")" \
   '[ "$(echo "$BODY" | json data.user.role)" = client ] && [ "$(echo "$BODY" | json data.user.email_verified)" = false ]'
 
 CODE="$(grep -F " $EMAIL verify_email " "$CODES" 2>/dev/null | tail -1 | awk '{print $NF}')"

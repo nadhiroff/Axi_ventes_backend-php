@@ -4,7 +4,6 @@ declare(strict_types=1);
 namespace Axi\Controllers;
 
 use Axi\Core\Clock;
-use Axi\Core\Config;
 use Axi\Core\Cursor;
 use Axi\Core\Database;
 use Axi\Core\HttpException;
@@ -12,6 +11,8 @@ use Axi\Core\Ids;
 use Axi\Core\Request;
 use Axi\Core\Response;
 use Axi\Core\Validator;
+use Axi\Services\Notifier;
+use Axi\Services\Settings;
 use Axi\Services\Uploads;
 use Axi\Support\Stalls;
 
@@ -35,11 +36,12 @@ final class CatalogController
         }
 
         Response::ok([
-            'city' => Config::get('city'),
-            'market_notice' => Config::get('anagem_partnership') ? ['text' => 'Service en ligne des marchés', 'partner' => 'ANaGeM'] : null,
+            'city' => ['id' => 'cotonou', 'name' => Settings::text('city_name')],
+            'market_notice' => Settings::bool('anagem_partnership') ? ['text' => 'Service en ligne des marchés', 'partner' => 'ANaGeM'] : null,
             'sponsored' => $this->sponsored(),
             'aisles' => Stalls::aisles(),
             'followed_stalls' => array_map([Stalls::class, 'summary'], $followed),
+            'featured_stalls' => $this->featuredStalls(),
         ], 200, 300);
     }
 
@@ -84,7 +86,7 @@ final class CatalogController
 
         Response::ok([
             'stall' => Stalls::detail($stall, $req->user === null ? null : $req->userId()),
-            'products' => array_map([Stalls::class, 'product'], array_slice($products, 0, self::PRODUCTS_PER_PAGE)),
+            'products' => Stalls::productList(array_slice($products, 0, self::PRODUCTS_PER_PAGE)),
             'products_updated_at' => Clock::iso(Database::value('SELECT MAX(updated_at) FROM products WHERE stall_id = ? AND status = \'active\'', [$id])),
             'next_cursor' => Cursor::next($offset, self::PRODUCTS_PER_PAGE, count($products)),
         ], 200, 300);
@@ -112,6 +114,8 @@ final class CatalogController
             'INSERT INTO voice_messages (stall_id, user_id, audio_path, created_at) VALUES (?, ?, ?, ?)',
             [$id, $req->userId(), Uploads::audio($audio), Clock::now()],
         );
+        $owner = (int) Database::value('SELECT user_id FROM stalls WHERE id = ?', [$id]);
+        Notifier::send($owner, 'order', 'Nouveau message vocal', $req->user['name'] . ' vous a laissé un message vocal. Écoutez-le dans « Mes clients ».', ['voice_messages' => true]);
         Response::ok(['message' => 'Message vocal envoyé. Le commerçant vous répondra ici ou par téléphone.']);
     }
 
@@ -130,26 +134,46 @@ final class CatalogController
         $stalls = Stalls::query('(s.name LIKE ? OR s.tagline LIKE ?)', [$like, $like], 'ORDER BY s.verified_at IS NULL, s.name LIMIT 20');
         $products = Database::all(
             'SELECT p.*, s.name AS stall_name, s.verified_at AS stall_verified_at
-             FROM products p JOIN stalls s ON s.id = p.stall_id
-             WHERE p.status = \'active\' AND s.status = \'active\' AND p.name LIKE ?
+             FROM products p JOIN stalls s ON s.id = p.stall_id JOIN users u ON u.id = s.user_id
+             WHERE p.status = \'active\' AND s.status = \'active\' AND u.status = \'active\' AND p.name LIKE ?
              ORDER BY p.in_stock DESC, p.is_today DESC, p.updated_at DESC LIMIT 30',
             [$like],
         );
         return [
             'query' => $query,
             'stalls' => array_map([Stalls::class, 'summary'], $stalls),
-            'products' => array_map(static fn (array $p): array => Stalls::product($p) + [
+            'products' => array_map(static fn (array $item, array $p): array => $item + [
                 'stall' => ['id' => Ids::encode('stl', $p['stall_id']), 'name' => $p['stall_name'], 'verified' => $p['stall_verified_at'] !== null],
-            ], $products),
+            ], Stalls::productList($products), $products),
         ];
     }
 
-    /** Campagne « Promotion sur l'accueil client » validée et en cours (une par jour, pour garder l'ETag stable), sinon null */
+    /** Fiche produit : toutes ses photos (galerie), son étal, favori ; enregistrée dans « récemment vus » */
+    public function product(Request $req): never
+    {
+        $id = $req->id('prd', 'PRODUCT_NOT_FOUND', 'Ce produit n\'existe pas ou a été supprimé.');
+        $p = Database::one('SELECT * FROM products WHERE id = ? AND status = \'active\'', [$id]);
+        $stall = $p === null ? null : Stalls::findActive((int) $p['stall_id']);
+        if ($stall === null) {
+            throw new HttpException(404, 'PRODUCT_NOT_FOUND', 'Ce produit n\'existe pas ou a été supprimé.');
+        }
+        $favorite = false;
+        if ($req->user !== null) {
+            Database::run('INSERT INTO product_views (user_id, product_id, viewed_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE viewed_at = VALUES(viewed_at)', [$req->userId(), $id, Clock::now()]);
+            $favorite = Database::value('SELECT 1 FROM favorites WHERE user_id = ? AND product_id = ?', [$req->userId(), $id]) !== null;
+        }
+        Response::ok(Stalls::product($p) + ['stall' => Stalls::summary($stall), 'is_favorite' => $favorite]);
+    }
+
+    /**
+     * Campagne « Promotion sur l'accueil client » validée par Axi et en cours (une par jour, pour garder
+     * l'ETag stable), sinon null. Aucune publicité n'est affichée sur la page d'un étal.
+     */
     private function sponsored(): ?array
     {
         $now = Clock::now();
         $c = Database::one(
-            'SELECT * FROM campaigns WHERE format = \'sponsored_home\' AND status = \'active\' AND title IS NOT NULL
+            'SELECT * FROM campaigns WHERE format IN (\'sponsored_home\', \'sponsored_aisle\') AND status = \'active\'
                AND (starts_at IS NULL OR starts_at <= ?) AND (ends_at IS NULL OR ends_at > ?)
              ORDER BY MD5(CONCAT(id, CURDATE())) LIMIT 1',
             [$now, $now],
@@ -158,21 +182,41 @@ final class CatalogController
             return null;
         }
         $target = match (true) {
-            $c['target_type'] === 'stall' && $c['target_id'] !== null => ['type' => 'stall', 'id' => Ids::encode('stl', $c['target_id'])],
-            $c['target_type'] === 'aisle' && $c['target_id'] !== null => ['type' => 'aisle', 'id' => $c['target_id']],
+            $c['target_stall_id'] !== null => ['type' => 'stall', 'id' => Ids::encode('stl', $c['target_stall_id'])],
             $c['aisle_id'] !== null => ['type' => 'aisle', 'id' => $c['aisle_id']],
             default => null,
         };
         if ($target === null) {
             return null;
         }
+        Database::run('UPDATE campaigns SET impressions = impressions + 1 WHERE id = ?', [$c['id']]);
         return [
             'id' => Ids::encode('spn', $c['id']),
             'label' => 'Sponsorisé',
             'title' => $c['title'],
-            'text' => (string) $c['body'],
-            'image' => null,
+            'text' => $c['body'],
+            'image' => Stalls::image($c['image_path'], 600, 300),
             'target' => $target,
         ];
+    }
+
+    /** Étals mis en avant par une campagne validée (« featured_stall ») */
+    private function featuredStalls(): array
+    {
+        $now = Clock::now();
+        $ids = array_column(Database::all(
+            'SELECT DISTINCT target_stall_id FROM campaigns WHERE format = \'featured_stall\' AND status = \'active\' AND target_stall_id IS NOT NULL
+               AND (starts_at IS NULL OR starts_at <= ?) AND (ends_at IS NULL OR ends_at > ?) LIMIT 6',
+            [$now, $now],
+        ), 'target_stall_id');
+        return $ids === [] ? [] : array_map([Stalls::class, 'summary'], Stalls::query('s.id IN (' . Database::in($ids) . ')', $ids));
+    }
+
+    /** Clic sur une promotion (compté pour l'annonceur) */
+    public function promotionClick(Request $req): never
+    {
+        $id = $req->id('spn');
+        Database::run('UPDATE campaigns SET clicks = clicks + 1 WHERE id = ? AND status = \'active\'', [$id]);
+        Response::ok(['counted' => true]);
     }
 }

@@ -36,13 +36,13 @@ final class Auth
     }
 
     /** Crée un jeton de session ; le jeton en clair n'est renvoyé qu'une fois, seul son sha256 est stocké. */
-    public static function issueToken(int $userId, ?string $device): string
+    public static function issueToken(int $userId, ?string $device, ?string $ip = null): string
     {
         $token = bin2hex(random_bytes(32));
         $now = Clock::now();
         Database::run(
-            'INSERT INTO auth_tokens (user_id, token_hash, device, expires_at, last_used_at, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-            [$userId, hash('sha256', $token), $device === null ? null : mb_substr($device, 0, 120), Clock::now(self::ttl()), $now, $now],
+            'INSERT INTO auth_tokens (user_id, token_hash, device, ip, expires_at, last_used_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [$userId, hash('sha256', $token), $device === null ? null : mb_substr($device, 0, 120), $ip, Clock::now(self::ttl()), $now, $now],
         );
         return $token;
     }

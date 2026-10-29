@@ -58,7 +58,7 @@ final class Uploads
     {
         self::checkUpload($file, self::MAX_AUDIO_BYTES, 'Le message vocal');
         $mime = (string) (new \finfo(FILEINFO_MIME_TYPE))->file($file['tmp_name']);
-        if (!str_starts_with($mime, 'audio/') && !in_array($mime, ['video/mp4', 'application/octet-stream'], true)) {
+        if (!str_starts_with($mime, 'audio/') && !in_array($mime, ['video/mp4', 'video/3gpp', 'video/webm', 'application/octet-stream'], true)) {
             throw new HttpException(422, 'INVALID_AUDIO', 'Le fichier envoyé n\'est pas un enregistrement audio.');
         }
         $relative = 'audio/' . gmdate('Y/m') . '/' . bin2hex(random_bytes(12)) . '.m4a';
