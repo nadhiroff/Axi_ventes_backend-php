@@ -510,6 +510,45 @@ call('PATCH', '/v1/me', ['avatar_visibility' => 'contacts'], $client);
 check('« mes contacts » : visible par le commerçant avec qui il discute', (call('GET', '/v1/conversations', null, $second)['body']['data']['conversations'][0]['other']['avatar'] ?? null) !== null);
 check('photo retirée', call('DELETE', '/v1/me/avatar', null, $client)['body']['data']['avatar'] === null);
 
+section('7f. Profil, suppression « pour moi », annonces, signalement et blocage');
+$followers = call('GET', '/v1/merchant/clients?segment=followers', null, $second)['body']['data'] ?? [];
+check('« Mes clients » : les abonnés de l\'étal apparaissent (segment Abonnés)', count($followers['clients'] ?? []) >= 0 && isset($followers['followers_count']), json_encode($followers));
+call('POST', "/v1/stalls/stl_$secondStall/follow", null, $client);
+$followers = call('GET', '/v1/merchant/clients?segment=followers', null, $second)['body']['data']['clients'] ?? [];
+check('un nouvel abonné entre dans le fichier clients, avec accès au profil et à la discussion', count($followers) === 1 && ($followers[0]['user_id'] ?? null) === "usr_$clientId" && $followers[0]['follows'] === true, json_encode($followers));
+$profile = call('GET', "/v1/users/usr_$clientId/profile", null, $second)['body']['data'] ?? [];
+check('profil vu par le commerçant : prénom + initiale, sans email ni téléphone', ($profile['display_name'] ?? '') === 'Sim C.' && !isset($profile['email']) && !isset($profile['phone']), json_encode($profile));
+check('profil d\'un inconnu : introuvable (404)', call('GET', "/v1/users/usr_$clientId/profile", null, $refused)['status'] === 404);
+$m = call('POST', "/v1/conversations/$conv/messages", ['body' => 'Message à masquer'], $second)['body']['data'] ?? [];
+call('POST', "/v1/conversations/$conv/messages/" . ($m['id'] ?? 'msg_0') . '/hide', null, $client);
+$clientSees = array_column(call('GET', "/v1/conversations/$conv/messages", null, $client)['body']['data']['messages'] ?? [], 'id');
+$merchantSees = array_column(call('GET', "/v1/conversations/$conv/messages", null, $second)['body']['data']['messages'] ?? [], 'id');
+check('message supprimé « pour moi » : disparu chez moi, toujours là chez l\'autre', !in_array($m['id'] ?? '', $clientSees, true) && in_array($m['id'] ?? '', $merchantSees, true));
+$r = call('POST', '/v1/merchant/arrivals', ['text' => 'Arrivage de riz parfumé ce matin !', 'photo' => new CURLFile($photo, 'image/webp')], $second, [], true);
+check('annonce d\'arrivage écrite sans abonnement : sur la page de l\'étal seulement', $r['status'] === 200 && count(call('GET', "/v1/stalls/stl_$secondStall")['body']['data']['stall']['announcements'] ?? []) === 1
+    && !in_array("stl_$secondStall", array_column(array_column(call('GET', '/v1/home')['body']['data']['announcements'] ?? [], 'stall'), 'id'), true), $r['raw']);
+call('POST', '/v1/merchant/arrivals', ['text' => 'Nouveaux pagnes wax arrivés'], $merchant, [], true);
+$home = call('GET', '/v1/home', null, $client)['body']['data']['announcements'] ?? [];
+check('commerçant abonné : annonce en petite pub sur l\'accueil, badge abonné, bouton suivre', in_array("stl_$stallId", array_column(array_column($home, 'stall'), 'id'), true) && ($home[0]['stall']['subscribed'] ?? false) === true, json_encode($home));
+call('POST', '/v1/stalls/stl_' . $stallId . '/voice-messages', ['audio' => new CURLFile(__DIR__ . '/fixtures/voix.m4a', 'audio/mp4', 'voix.m4a')], $client, [], true);
+$vm = call('GET', '/v1/merchant/voice-messages', null, $merchant)['body']['data']['messages'][0]['id'] ?? 'vm_0';
+check('message vocal reçu supprimé par le commerçant', call('DELETE', "/v1/merchant/voice-messages/$vm", null, $merchant)['status'] === 200
+    && !in_array($vm, array_column(call('GET', '/v1/merchant/voice-messages', null, $merchant)['body']['data']['messages'] ?? [], 'id'), true));
+$before = (int) Database::value('SELECT COUNT(*) FROM notifications WHERE user_id = ?', [$clientId]);
+call('POST', '/v1/notifications/read', ['all' => true], $client);
+check('notifications vues : effacées', $before > 0 && (int) Database::value('SELECT COUNT(*) FROM notifications WHERE user_id = ?', [$clientId]) === 0);
+$r = call('POST', "/v1/users/usr_$secondId/report", ['reason' => 'fraud', 'details' => 'Demande un paiement hors Axi.', 'conversation_id' => $conv], $client);
+check('signaler un profil', $r['status'] === 201 && call('POST', "/v1/users/usr_$secondId/report", ['reason' => 'spam'], $client)['status'] === 409, $r['raw']);
+check('le signalement apparaît dans l\'espace web', str_contains(call('GET', '/pro/signalements', null, null, [], false, true)['raw'], 'Demande un paiement hors Axi.'));
+$reportId = (int) Database::value('SELECT id FROM reports WHERE target_user_id = ?', [$secondId]);
+call('POST', "/pro/signalements/$reportId/bloquer", ['_csrf' => $csrf, 'reason' => 'Tentative d\'arnaque signalée.'], null, [], false, true);
+$login = call('POST', '/v1/auth/login', ['email' => "sim-commercant2-$stamp@example.com", 'password' => 'simulation-123']);
+check('compte bloqué : déconnecté, et message avec le motif à la connexion', call('GET', '/v1/me', null, $second)['status'] === 401 && ($login['body']['error']['code'] ?? '') === 'ACCOUNT_SUSPENDED'
+    && str_contains($login['body']['error']['message'] ?? '', 'Tentative d\'arnaque'), $login['raw']);
+check('étal du commerçant bloqué : invisible', call('GET', "/v1/stalls/stl_$secondStall")['status'] === 404);
+call('POST', "/pro/clients/$secondId/activer", ['_csrf' => $csrf], null, [], false, true);
+check('accès débloqué par l\'agent : connexion de nouveau possible', call('POST', '/v1/auth/login', ['email' => "sim-commercant2-$stamp@example.com", 'password' => 'simulation-123'])['status'] === 200);
+
 // ---------------------------------------------------------------------------
 section('8. Partenaires : IMF, ANaGeM, annonceur (données agrégées, consentement)');
 webLogin('imf@example.com', 'Partenaire-2026!');

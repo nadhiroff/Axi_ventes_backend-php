@@ -52,7 +52,8 @@ final class Credits
                 ? '<a href="' . View::url('/pro/credits/dossier/' . $c['consent_id']) . '">' . View::e($c['stall']) . '</a>'
                 : View::e($c['stall']) . '<br><span class="muted">Partage retiré : historique non visible</span>';
             $decision = '';
-            if (!$isAxi && in_array($c['status'], ['new', 'in_review', 'granted'], true)) {
+            // L'IMF décide ; l'agent Axi peut aussi décider (pilote sans IMF, ou dossier transmis à l'IMF hors ligne)
+            if (in_array($c['status'], ['new', 'in_review', 'granted'], true)) {
                 $decision = Html::form('/pro/credits/' . $c['id'], [
                     'status' => ['Statut', 'select', $c['status'], ['in_review' => 'En étude', 'granted' => 'Accordé', 'declined' => 'Refusé', 'repaid' => 'Remboursé']],
                     'amount' => ['Montant accordé', 'number', (string) ($c['amount'] ?? ''), ['attrs' => ' min="0"']],
@@ -66,7 +67,10 @@ final class Credits
                 View::e($f['stall']), View::e($f['site'] . ' · ' . $f['aisle']), View::date($f['granted_at'], false), View::e($f['scope']),
                 '<a class="btn ghost" href="' . View::url('/pro/credits/dossier/' . $f['id']) . '">Voir l\'historique</a>',
             ], $files), 'Aucun commerçant n\'a encore accepté de partager son historique.');
-        Html::page('Crédits', $body, 'Seuls les commerçants qui ont coché « Partager mon historique » apparaissent ici ; l\'accord est révocable à tout moment.');
+        $explain = '<p class="note">Axi ne prête pas. Un commerçant qui a accepté de partager son historique de ventes peut demander un crédit (stock, équipement) : '
+            . 'l\'institution de microfinance (IMF) étudie le dossier sans garantie à fournir et décide. Axi touche une commission sur chaque crédit accordé. '
+            . 'Passez la demande « En étude », puis « Accordé » (avec le montant) ou « Refusé » : le commerçant est prévenu dans l\'application et par email.</p>';
+        Html::page('Financement', $explain . $body, 'Seuls les commerçants qui ont coché « Partager mon historique » apparaissent ici ; l\'accord est révocable à tout moment.');
     }
 
     /** Historique mensuel d'un commerçant, uniquement sous consentement actif */
@@ -99,10 +103,12 @@ final class Credits
 
     public function update(Request $req): never
     {
-        $user = WebAuth::require(['mfi']);
+        $user = WebAuth::require(['mfi', 'axi']);
         WebAuth::checkCsrf();
         $id = (int) ($req->params['id'] ?? 0);
-        $c = Database::one('SELECT * FROM credits WHERE id = ? AND organization_id = ?', [$id, $user['organization_id']]) ?? throw new HttpException(404, 'NOT_FOUND', 'Demande introuvable.');
+        $c = ($user['partner_type'] === 'axi'
+            ? Database::one('SELECT * FROM credits WHERE id = ?', [$id])
+            : Database::one('SELECT * FROM credits WHERE id = ? AND organization_id = ?', [$id, $user['organization_id']])) ?? throw new HttpException(404, 'NOT_FOUND', 'Demande introuvable.');
         $status = array_key_exists($_POST['status'] ?? '', self::STATUS) ? $_POST['status'] : $c['status'];
         $amount = trim((string) ($_POST['amount'] ?? '')) === '' ? null : max(0, (int) $_POST['amount']);
         if ($status === 'granted' && ($amount === null || $amount <= 0)) {
@@ -111,7 +117,8 @@ final class Credits
         Database::run('UPDATE credits SET status = ?, amount = ?, note = ?, decided_by = ?, decided_at = ? WHERE id = ?', [$status, $amount, mb_substr(trim((string) ($_POST['note'] ?? '')), 0, 300) ?: null, $user['id'], Clock::now(), $id]);
         $req->user = $user;
         AdminLog::record($req, 'credit.update', 'credit', $id, ['status' => $status, 'amount' => $amount]);
-        Notifier::send((int) $c['merchant_user_id'], 'account', 'Votre demande de crédit', 'Statut : ' . self::STATUS[$status][0] . ($amount ? ' · ' . View::fcfa($amount) : '') . '.');
+        $note = trim((string) ($_POST['note'] ?? ''));
+        Notifier::send((int) $c['merchant_user_id'], 'account', 'Votre demande de crédit : ' . mb_strtolower(self::STATUS[$status][0]), 'Statut : ' . self::STATUS[$status][0] . ($amount ? ' · ' . View::fcfa($amount) : '') . '.' . ($note !== '' ? ' ' . $note : ''), [], [], true);
         View::redirect('/pro/credits', 'Décision enregistrée.');
     }
 }

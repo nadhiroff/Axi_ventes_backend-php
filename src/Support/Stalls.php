@@ -22,7 +22,8 @@ final class Stalls
     public static function query(string $where = '1', array $params = [], string $suffix = '', bool $includeInactive = false): array
     {
         $sql = 'SELECT s.*, IF(s.site_id = \'autre\' AND s.site_other IS NOT NULL, s.site_other, si.name) AS site_name, si.map_url AS site_map_url, u.name AS owner_name, u.status AS owner_status,
-                  EXISTS (SELECT 1 FROM products p WHERE p.stall_id = s.id AND ' . self::VISIBLE . ' AND p.created_at > ?) AS has_new
+                  EXISTS (SELECT 1 FROM products p WHERE p.stall_id = s.id AND ' . self::VISIBLE . ' AND p.created_at > ?) AS has_new,
+                  EXISTS (SELECT 1 FROM subscriptions x WHERE x.stall_id = s.id AND x.status = \'active\' AND x.ends_on >= CURDATE()) AS subscribed
                 FROM stalls s
                 JOIN sites si ON si.id = s.site_id
                 JOIN users u ON u.id = s.user_id
@@ -63,6 +64,8 @@ final class Stalls
             'avatar' => self::image($s['photo_path'], $s['photo_width'] === null ? null : (int) $s['photo_width'], $s['photo_height'] === null ? null : (int) $s['photo_height']),
             'aisle_id' => $s['aisle_id'],
             'verified' => $s['verified_at'] !== null,
+            // Badge « Axi Pro » : commerçant abonné (comme le badge des comptes certifiés des réseaux sociaux)
+            'subscribed' => (bool) ($s['subscribed'] ?? false),
             'is_open' => (bool) $s['is_open'],
             'location' => self::location($s),
             'has_new_products' => (bool) $s['has_new'],
@@ -80,6 +83,7 @@ final class Stalls
             'photos' => array_values(array_filter([self::summary($s)['avatar'], ...$gallery])),
             'gallery_count' => count($gallery),
             'followers_count' => (int) Database::value('SELECT COUNT(*) FROM stall_follows WHERE stall_id = ?', [$s['id']]),
+            'announcements' => array_map([self::class, 'announcement'], Database::all('SELECT * FROM stall_announcements WHERE stall_id = ? AND expires_at > ? ORDER BY id DESC LIMIT 3', [$s['id'], Clock::now()])),
             'owner_display_name' => $s['owner_name'],
             'verification' => $s['verified_at'] === null ? null : ['by' => 'agent', 'verified_at' => Clock::iso($s['verified_at'])],
             'pay_on_delivery' => (bool) $s['pay_on_delivery'],
@@ -90,6 +94,17 @@ final class Stalls
                 'accepts_voice_messages' => (bool) $s['accepts_voice_messages'],
             ],
             'is_followed' => $followed,
+        ];
+    }
+
+    /** Annonce d'arrivage : texte, photo facultative, date */
+    public static function announcement(array $a): array
+    {
+        return [
+            'id' => Ids::encode('ann', $a['id']),
+            'text' => $a['body'],
+            'image' => self::image($a['photo_path'], $a['photo_width'] === null ? null : (int) $a['photo_width'], $a['photo_height'] === null ? null : (int) $a['photo_height']),
+            'created_at' => Clock::iso($a['created_at']),
         ];
     }
 

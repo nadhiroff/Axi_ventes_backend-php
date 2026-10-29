@@ -30,7 +30,8 @@ final class WebAuth
     public const MANAGE = [
         ['/pro/demandes', 'Demandes commerçants'],
         ['/pro/commercants', 'Commerçants'],
-        ['/pro/clients', 'Clients'],
+        ['/pro/clients', 'Utilisateurs (bloquer, débloquer)'],
+        ['/pro/signalements', 'Signalements'],
         ['/pro/commandes', 'Commandes et litiges'],
         ['/pro/paiements', 'Paiements et versements'],
         ['/pro/allees', 'Allées et marchés'],

@@ -30,6 +30,7 @@ final class AuthController
         'phone' => 'Téléphone',
         'password_confirmation' => 'Confirmation du mot de passe',
         'avatar_visibility' => 'Qui voit ma photo',
+        'bio' => 'À propos de moi',
         'code' => 'Code',
         'current_password' => 'Mot de passe actuel',
         'new_password' => 'Nouveau mot de passe',
@@ -166,7 +167,9 @@ final class AuthController
         }
         if ($user['status'] !== 'active') {
             self::recordLogin((int) $user['id'], $email, $ip, $device, $channel, false, 'suspended');
-            throw new HttpException(403, 'ACCOUNT_SUSPENDED', 'Votre compte est suspendu. Contactez l\'équipe Axi.');
+            throw new HttpException(403, 'ACCOUNT_SUSPENDED', 'Votre accès à Axi a été bloqué par l\'équipe Axi.'
+                . (!empty($user['suspended_reason']) ? ' Motif : ' . $user['suspended_reason'] : '')
+                . ' Pour toute question, répondez à l\'email reçu ou contactez un agent Axi.');
         }
         if (password_needs_rehash($user['password_hash'], PASSWORD_DEFAULT)) {
             Database::run('UPDATE users SET password_hash = ? WHERE id = ?', [password_hash($password, PASSWORD_DEFAULT), $user['id']]);
@@ -246,6 +249,7 @@ final class AuthController
             'phone' => 'phone',
             'lang' => 'in:fr,en,fon,yo',
             'avatar_visibility' => 'in:everyone,contacts,nobody',
+            'bio' => 'string|max:300',
         ], self::LABELS);
 
         if (isset($in['phone']) && Database::value('SELECT id FROM users WHERE phone = ? AND id <> ?', [$in['phone'], $req->userId()]) !== null) {
@@ -253,6 +257,9 @@ final class AuthController
         }
         if (array_key_exists('phone', $body) && ($body['phone'] === null || $body['phone'] === '')) {
             $in['phone'] = null;
+        }
+        if (array_key_exists('bio', $body) && ($body['bio'] === null || trim((string) $body['bio']) === '')) {
+            $in['bio'] = null;
         }
         if ($in !== []) {
             $first = $in['first_name'] ?? $req->user['first_name'];

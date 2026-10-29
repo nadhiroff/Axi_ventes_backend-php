@@ -12,7 +12,7 @@
 SET NAMES utf8mb4;
 SET time_zone = '+00:00';
 SET FOREIGN_KEY_CHECKS = 0;
-DROP TABLE IF EXISTS stall_photos, messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
+DROP TABLE IF EXISTS stall_announcements, reports, message_hidden, stall_photos, messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
 SET FOREIGN_KEY_CHECKS = 1;
 
 CREATE TABLE schema_migrations (
@@ -885,6 +885,81 @@ ALTER TABLE conversations
   ADD COLUMN merchant_delivered_msg_id INT UNSIGNED NOT NULL DEFAULT 0 AFTER client_delivered_msg_id;
 
 INSERT INTO schema_migrations (file, applied_at) VALUES ('005_coches_par_message.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 006_profil_signalements_annonces.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 006 : présentation publique du profil, suppression d'un message « pour moi », signalements,
+--       blocage d'accès avec motif, annonces d'arrivage écrites.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+
+-- « À propos » visible des personnes avec qui l'on échange ; motif affiché quand l'accès est bloqué
+ALTER TABLE users
+  ADD COLUMN bio VARCHAR(300) NULL AFTER avatar_visibility,
+  ADD COLUMN suspended_reason VARCHAR(300) NULL AFTER status;
+
+-- Message supprimé « pour moi » : il reste chez l'autre personne
+CREATE TABLE message_hidden (
+  user_id INT UNSIGNED NOT NULL,
+  message_id INT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL,
+  PRIMARY KEY (user_id, message_id),
+  CONSTRAINT fk_hidden_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_hidden_message FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Signalement d'un profil : examiné par un agent Axi (bloquer l'accès ou classer)
+CREATE TABLE reports (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  reporter_id INT UNSIGNED NOT NULL,
+  target_user_id INT UNSIGNED NOT NULL,
+  conversation_id INT UNSIGNED NULL,
+  reason ENUM('spam','fraud','insult','fake','other') NOT NULL,
+  details VARCHAR(1000) NULL,
+  status ENUM('open','blocked','dismissed') NOT NULL DEFAULT 'open',
+  handled_by INT UNSIGNED NULL,
+  handled_at DATETIME NULL,
+  created_at DATETIME NOT NULL,
+  KEY idx_reports_status (status, id),
+  KEY idx_reports_target (target_user_id),
+  CONSTRAINT fk_reports_reporter FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_reports_target FOREIGN KEY (target_user_id) REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_reports_conversation FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+-- Annonce d'arrivage écrite (photo facultative), visible 7 jours sur la page de l'étal ;
+-- pour un commerçant abonné, aussi en petite annonce sur l'accueil des clients
+CREATE TABLE stall_announcements (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  stall_id INT UNSIGNED NOT NULL,
+  body VARCHAR(500) NOT NULL,
+  photo_path VARCHAR(255) NULL,
+  photo_width SMALLINT UNSIGNED NULL,
+  photo_height SMALLINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL,
+  expires_at DATETIME NOT NULL,
+  KEY idx_announcements_stall (stall_id, expires_at),
+  KEY idx_announcements_expiry (expires_at),
+  CONSTRAINT fk_announcements_stall FOREIGN KEY (stall_id) REFERENCES stalls(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('006_profil_signalements_annonces.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 007_abonnes_dans_fichier_clients.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 007 : les personnes qui suivent un étal apparaissent dans « Mes clients » du commerçant.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+INSERT IGNORE INTO merchant_clients (stall_id, user_id, display_name, email, created_at)
+SELECT f.stall_id, u.id, CONCAT(u.first_name, ' ', LEFT(u.last_name, 1), '.'), u.email, f.created_at
+FROM stall_follows f JOIN users u ON u.id = f.user_id
+WHERE u.status = 'active';
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('007_abonnes_dans_fichier_clients.sql', UTC_TIMESTAMP());
 
 -- -----------------------------------------------------------------------------
 -- Comptes de test (un par rôle, et un par type de partenaire). Changer les mots de passe en production.

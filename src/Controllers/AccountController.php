@@ -243,12 +243,13 @@ final class AccountController
     /** { "ids": ["ntf_1"] } ou { "all": true } */
     public function readNotifications(Request $req): never
     {
+        // Une notification vue est effacée : la liste ne garde que les nouvelles
         if ($req->input('all') === true) {
-            Database::run('UPDATE notifications SET read_at = ? WHERE user_id = ? AND read_at IS NULL', [Clock::now(), $req->userId()]);
+            Database::run('DELETE FROM notifications WHERE user_id = ?', [$req->userId()]);
         } else {
             $ids = array_filter(array_map(static fn ($id) => Ids::tryDecode('ntf', $id), (array) $req->input('ids', [])));
             if ($ids !== []) {
-                Database::run('UPDATE notifications SET read_at = ? WHERE user_id = ? AND id IN (' . Database::in($ids) . ')', [Clock::now(), $req->userId(), ...$ids]);
+                Database::run('DELETE FROM notifications WHERE user_id = ? AND id IN (' . Database::in($ids) . ')', [$req->userId(), ...$ids]);
             }
         }
         Response::ok(['unread' => (int) Database::value('SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read_at IS NULL', [$req->userId()])]);

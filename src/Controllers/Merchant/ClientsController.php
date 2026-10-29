@@ -30,7 +30,7 @@ final class ClientsController
     {
         $stall = Merchant::stall($req);
         $segment = (string) $req->query('segment', 'all');
-        if (!in_array($segment, ['all', 'resellers', 'loyal', 'to_follow_up'], true)) {
+        if (!in_array($segment, ['all', 'followers', 'resellers', 'loyal', 'to_follow_up'], true)) {
             Validator::fail(['segment' => 'Valeur non autorisée.'], self::LABELS);
         }
         [$where, $params] = $this->segmentSql($segment);
@@ -41,6 +41,7 @@ final class ClientsController
             array_push($params, $like, $like, $like);
         }
         $rows = Database::all("SELECT * FROM merchant_clients WHERE stall_id = ? AND $where ORDER BY COALESCE(last_order_at, created_at) DESC LIMIT 500", [$stall['id'], ...$params]);
+        $followers = (int) Database::value('SELECT COUNT(*) FROM stall_follows WHERE stall_id = ?', [$stall['id']]);
 
         [$loyalWhere, $loyalParams] = $this->segmentSql('loyal');
         $hasLoyal = Database::value("SELECT 1 FROM merchant_clients WHERE stall_id = ? AND $loyalWhere LIMIT 1", [$stall['id'], ...$loyalParams]) !== null;
@@ -51,6 +52,7 @@ final class ClientsController
                 'text' => 'Prévenez vos clients fidèles en un message, par Axi ou par WhatsApp.',
                 'button_label' => 'Envoyer à mes clients fidèles',
             ] : null,
+            'followers_count' => $followers,
             'clients' => array_map([$this, 'present'], $rows),
         ], 200, 60);
     }
@@ -187,12 +189,36 @@ final class ClientsController
     }
 
     /** « Annoncer un arrivage en vocal » aux clients fidèles */
+    /**
+     * Annonce d'arrivage ÉCRITE (photo facultative), visible 7 jours sur la page de l'étal.
+     * Commerçant abonné : aussi en petite annonce sur l'accueil des clients, et envoyée à ses clients fidèles et abonnés.
+     */
     public function arrival(Request $req): never
     {
         $stall = Merchant::stall($req);
-        Subscription::require((int) $stall['id'], 'L\'annonce d\'arrivage');
-        $audio = $req->file('audio') ?? Validator::fail(['audio' => 'Enregistrez votre message vocal.'], ['audio' => 'Message vocal']);
-        Response::ok(Broadcaster::send($stall, 'arrival', 'loyal', 'Arrivage chez ' . $stall['name'], 'Écoutez le message vocal de ' . $stall['name'] . ' sur ses nouveaux produits.', $this->clients((int) $stall['id'], 'loyal'), Uploads::audio($audio)));
+        $text = trim((string) (Validator::validate($req->all(), ['text' => 'required|string|max:500'], ['text' => 'Annonce'])['text'] ?? ''));
+        if (mb_strlen($text) < 3) {
+            Validator::fail(['text' => 'Écrivez votre annonce.'], ['text' => 'Annonce']);
+        }
+        $photo = $req->file('photo') === null ? null : Uploads::photo($req->file('photo'));
+        Database::insert(
+            'INSERT INTO stall_announcements (stall_id, body, photo_path, photo_width, photo_height, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [$stall['id'], $text, $photo['path'] ?? null, $photo['width'] ?? null, $photo['height'] ?? null, Clock::now(), Clock::now(7 * 86400)],
+        );
+        if (!Subscription::active((int) $stall['id'])) {
+            Response::ok([
+                'recipients' => 0, 'notified' => 0, 'emailed' => 0, 'whatsapp_url' => null, 'share_text' => $text,
+                'message' => 'Annonce publiée sur la page de votre étal pendant 7 jours. Abonnez-vous pour la montrer aussi sur l\'accueil de tous les clients et l\'envoyer à vos clients.',
+            ]);
+        }
+        $clients = array_values(array_merge($this->clients((int) $stall['id'], 'loyal'), $this->clients((int) $stall['id'], 'followers')));
+        $unique = [];
+        foreach ($clients as $c) {
+            $unique[$c['id']] = $c;
+        }
+        $result = Broadcaster::send($stall, 'arrival', 'loyal', 'Arrivage chez ' . $stall['name'], $text, array_values($unique));
+        $result['message'] = 'Annonce publiée sur votre étal et sur l\'accueil des clients. ' . $result['message'];
+        Response::ok($result);
     }
 
     private function find(Request $req, int $stallId): array
@@ -212,6 +238,7 @@ final class ClientsController
     private function segmentSql(string $segment): array
     {
         return match ($segment) {
+            'followers' => ['EXISTS (SELECT 1 FROM stall_follows f WHERE f.user_id = merchant_clients.user_id AND f.stall_id = merchant_clients.stall_id)', []],
             'resellers' => ['kind = \'reseller\'', []],
             'loyal' => ['orders_count >= ?', [Settings::int('loyal_min_orders')]],
             'to_follow_up' => ['last_order_at < ?', [Clock::now(-86400 * Settings::int('follow_up_days'))]],
@@ -221,16 +248,19 @@ final class ClientsController
 
     private function present(array $c): array
     {
+        $user = $c['user_id'] === null ? null : Database::one('SELECT id, avatar_path, avatar_visibility, status FROM users WHERE id = ?', [$c['user_id']]);
+        $follows = $c['user_id'] !== null && Database::value('SELECT 1 FROM stall_follows WHERE user_id = ? AND stall_id = ?', [$c['user_id'], $c['stall_id']]) !== null;
         $followUpBefore = Clock::now(-86400 * Settings::int('follow_up_days'));
         $newAfter = Clock::now(-86400 * 7);
         $badge = match (true) {
             $c['last_order_at'] !== null && $c['last_order_at'] < $followUpBefore => ['kind' => 'follow_up', 'label' => 'Relancer'],
             (int) $c['orders_count'] <= 1 && max($c['created_at'], $c['last_order_at'] ?? '') >= $newAfter => ['kind' => 'new', 'label' => 'Nouveau'],
             (int) $c['orders_count'] >= Settings::int('loyal_min_orders') => ['kind' => 'loyal', 'label' => 'Fidèle'],
+            $follows && (int) $c['orders_count'] === 0 => ['kind' => 'follower', 'label' => 'Abonné'],
             default => null,
         };
         $kind = $c['kind'] === 'reseller' ? 'Revendeur' : 'Particulier';
-        $when = $c['last_order_at'] !== null ? 'dernier achat ' . self::ago($c['last_order_at']) : 'ajouté ' . self::ago($c['created_at']);
+        $when = $c['last_order_at'] !== null ? 'dernier achat ' . self::ago($c['last_order_at']) : ($follows ? 'vous suit depuis ' : 'ajouté ') . self::ago($c['created_at']);
         return [
             'id' => Ids::encode('cli', $c['id']),
             'display_name' => $c['display_name'],
@@ -238,6 +268,10 @@ final class ClientsController
             'phone' => $c['phone'],
             'email' => $c['email'],
             'badge' => $badge,
+            // Compte Axi : profil (présentation) et discussion directe dans l'application
+            'user_id' => $user === null || $user['status'] !== 'active' ? null : Ids::encode('usr', $user['id']),
+            'avatar' => $user === null ? null : \Axi\Support\Users::avatarFor($user + ['avatar_path' => $user['avatar_path']], null, true),
+            'follows' => $follows,
         ];
     }
 

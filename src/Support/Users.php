@@ -42,6 +42,7 @@ final class Users
             'phone' => $u['phone'],
             'avatar' => Stalls::image($u['avatar_path'] ?? null, 600, 600),
             'avatar_visibility' => $u['avatar_visibility'] ?? 'everyone',
+            'bio' => $u['bio'] ?? null,
             'role' => $u['role'],
             'lang' => $u['lang'],
             'organization' => $organization,

@@ -157,3 +157,16 @@ l'app pour les clients qui ont un compte Axi, email pour les autres, lien WhatsA
 (relance, nouvelle adresse, arrivage, envoi à un segment). Les produits au-delà de la limite passent en `status: paused`
 (masqués, pas supprimés) et reviennent en vente au paiement de l'abonnement. `subscription.limits` et `subscription.benefits`
 décrivent ce qui est limité et ce que l'abonnement débloque.
+
+## Profil, signalement, annonces (ajouts)
+
+| Route | Rôle |
+|---|---|
+| `GET /v1/users/{usr_…}/profile` | présentation publique (prénom + initiale, photo selon son choix, `bio`, membre depuis, étal) ; seulement entre personnes en relation |
+| `POST /v1/users/{usr_…}/report` | `{ reason: spam\|fraud\|insult\|fake\|other, details?, conversation_id? }` ; un agent Axi peut bloquer l'accès |
+| `POST /v1/conversations/{conv_…}/messages/{msg_…}/hide` | supprimer un message « pour moi » (il reste chez l'autre) |
+| `DELETE /v1/merchant/voice-messages/{vm_…}` | supprimer un message vocal reçu |
+| `POST /v1/merchant/arrivals` | multipart `text` (+ `photo` facultative) : annonce 7 jours sur l'étal ; abonné : aussi sur l'accueil (`home.announcements`) et envoyée aux clients |
+
+`PATCH /v1/me { bio }`. Étals : `subscribed` (badge abonné), page de l'étal : `announcements[]`. Clients du commerçant : segment `followers`,
+`user_id`, `avatar`, `follows`. Notifications : `POST /v1/notifications/read` les **efface**. Compte bloqué : `403 ACCOUNT_SUSPENDED` avec le motif.

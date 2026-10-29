@@ -42,7 +42,36 @@ final class CatalogController
             'aisles' => Stalls::aisles(),
             'followed_stalls' => array_map([Stalls::class, 'summary'], $followed),
             'featured_stalls' => $this->featuredStalls(),
+            'announcements' => $this->announcements($req->user === null ? null : $req->userId()),
         ], 200, 300);
+    }
+
+    /**
+     * Petites annonces d'arrivage des commerçants ABONNÉS (7 derniers jours), avec photo, sur l'accueil :
+     * le client peut suivre l'étal d'un geste. Ordre tiré chaque jour pour que chacun passe à son tour.
+     */
+    private function announcements(?int $viewerId): array
+    {
+        $rows = Database::all(
+            'SELECT a.* FROM stall_announcements a JOIN stalls s ON s.id = a.stall_id JOIN users u ON u.id = s.user_id
+             WHERE a.expires_at > ? AND s.status = \'active\' AND u.status = \'active\'
+               AND EXISTS (SELECT 1 FROM subscriptions x WHERE x.stall_id = s.id AND x.status = \'active\' AND x.ends_on >= CURDATE())
+               AND a.id = (SELECT MAX(b.id) FROM stall_announcements b WHERE b.stall_id = a.stall_id AND b.expires_at > ?)
+             ORDER BY MD5(CONCAT(a.id, CURDATE())) LIMIT 8',
+            [Clock::now(), Clock::now()],
+        );
+        $out = [];
+        foreach ($rows as $a) {
+            $stall = Stalls::findActive((int) $a['stall_id']);
+            if ($stall === null) {
+                continue;
+            }
+            $out[] = Stalls::announcement($a) + [
+                'stall' => Stalls::summary($stall),
+                'is_followed' => $viewerId !== null && Database::value('SELECT 1 FROM stall_follows WHERE user_id = ? AND stall_id = ?', [$viewerId, $stall['id']]) !== null,
+            ];
+        }
+        return $out;
     }
 
     public function aisle(Request $req): never
@@ -98,6 +127,12 @@ final class CatalogController
         Database::run('INSERT IGNORE INTO stall_follows (user_id, stall_id, created_at) VALUES (?, ?, ?)', [$req->userId(), $id, Clock::now()]);
         // Suivre l'étal garde la conversation avec le commerçant (sinon effacée après 24 h)
         \Axi\Services\Messaging::keep($req->userId(), $id);
+        // et ajoute la personne au fichier « Mes clients » du commerçant (abonné)
+        Database::run(
+            "INSERT IGNORE INTO merchant_clients (stall_id, user_id, display_name, email, created_at)
+             SELECT ?, id, CONCAT(first_name, ' ', LEFT(last_name, 1), '.'), email, ? FROM users WHERE id = ?",
+            [$id, Clock::now(), $req->userId()],
+        );
         Response::ok(['is_followed' => true]);
     }
 
