@@ -460,6 +460,23 @@ $r = call('POST', "/v1/conversations/$conv/messages", ['audio' => new CURLFile(_
 check('message vocal envoyé (lien d\'écoute signé)', str_contains((string) ($r['body']['data']['audio_url'] ?? ''), 'sig='), $r['raw']);
 $msgs = call('GET', "/v1/conversations/$conv/messages", null, $client)['body']['data'] ?? [];
 check('le client voit les 4 messages et la règle des 24 h', count($msgs['messages'] ?? []) === 4 && $msgs['conversation']['kept'] === false, json_encode($msgs['conversation'] ?? []));
+$mine = array_values(array_filter($msgs['messages'], static fn ($m) => $m['mine']));
+check('mes messages : ✓✓ bleu (lu) quand le commerçant a ouvert la conversation', ($mine[0]['status'] ?? '') === 'read', json_encode($mine[0] ?? []));
+check('le commerçant est « en ligne » (application ouverte)', ($msgs['conversation']['other_online'] ?? false) === true);
+sleep(1); // horodatage à la seconde : le message suivant est envoyé après la dernière lecture du commerçant
+$sent = call('POST', "/v1/conversations/$conv/messages", ['body' => 'Je passe demain.'], $client)['body']['data'] ?? [];
+sleep(1);
+check('nouveau message : ✓ envoyé, pas encore reçu', ($sent['status'] ?? '') === 'sent', json_encode($sent));
+call('GET', '/v1/me/badges', null, $second);
+$after = call('GET', "/v1/conversations/$conv/messages", null, $client)['body']['data']['messages'] ?? [];
+check('application du commerçant ouverte : ✓✓ reçu (pas encore lu)', (end($after)['status'] ?? '') === 'delivered', json_encode(end($after)));
+$r = call('PATCH', "/v1/conversations/$conv/messages/" . $sent['id'], ['body' => 'Je passe après-demain.'], $client);
+check('modifier son message : texte changé, « modifié »', ($r['body']['data']['body'] ?? '') === 'Je passe après-demain.' && $r['body']['data']['edited'] === true, $r['raw']);
+check('impossible de modifier le message de l\'autre (403)', call('PATCH', "/v1/conversations/$conv/messages/" . $sent['id'], ['body' => 'x'], $second)['status'] === 403);
+$r = call('DELETE', "/v1/conversations/$conv/messages/" . $sent['id'], null, $client);
+check('supprimer son message : « supprimé » pour tout le monde, texte effacé', ($r['body']['data']['deleted'] ?? false) === true && $r['body']['data']['body'] === null
+    && Database::value('SELECT body FROM messages WHERE id = ?', [id($sent['id'])]) === null, $r['raw']);
+$msgs = call('GET', "/v1/conversations/$conv/messages", null, $client)['body']['data'] ?? [];
 $last = end($msgs['messages']);
 check('« après » un message : seulement les nouveaux (rafraîchissement léger)', count(call('GET', "/v1/conversations/$conv/messages?after=" . $last['id'], null, $client)['body']['data']['messages'] ?? [1]) === 0);
 check('un tiers ne peut pas lire la conversation (404)', call('GET', "/v1/conversations/$conv/messages", null, $merchant)['status'] === 404);
@@ -469,7 +486,7 @@ call('DELETE', "/v1/stalls/stl_$secondStall/follow", null, $client);
 check('il ne suit plus : effacement programmé dans 24 h', (int) Database::value('SELECT COUNT(*) FROM messages m WHERE m.conversation_id = ? AND m.expires_at IS NULL', [id($conv)]) === 0);
 Database::run('UPDATE messages SET expires_at = ? WHERE conversation_id = ?', [\Axi\Core\Clock::now(-60), id($conv)]);
 check('après 24 h : messages invisibles puis effacés par la tâche planifiée', count(call('GET', "/v1/conversations/$conv/messages", null, $client)['body']['data']['messages'] ?? [1]) === 0
-    && \Axi\Services\Messaging::purgeExpired() >= 4 && (int) Database::value('SELECT COUNT(*) FROM messages WHERE conversation_id = ?', [id($conv)]) === 0);
+    && \Axi\Services\Messaging::purgeExpired() >= 5 && (int) Database::value('SELECT COUNT(*) FROM messages WHERE conversation_id = ?', [id($conv)]) === 0);
 $riceClient = (string) (call('GET', '/v1/merchant/clients', null, $second)['body']['data']['clients'][0]['id'] ?? 'cli_0');
 $r = call('POST', "/v1/merchant/clients/$riceClient/conversation", null, $second);
 check('le commerçant peut écrire à un de ses clients qui a un compte', ($r['body']['data']['conversation']['id'] ?? '') === $conv, $r['raw']);

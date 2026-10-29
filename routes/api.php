@@ -66,6 +66,8 @@ return static function (Router $r): void {
     $r->get('/v1/conversations', [MessagesController::class, 'index'], $user);
     $r->get('/v1/conversations/{id}/messages', [MessagesController::class, 'messages'], $user);
     $r->post('/v1/conversations/{id}/messages', [MessagesController::class, 'send'], $user);
+    $r->patch('/v1/conversations/{id}/messages/{message}', [MessagesController::class, 'edit'], $user);
+    $r->delete('/v1/conversations/{id}/messages/{message}', [MessagesController::class, 'delete'], $user);
     $r->post('/v1/conversations/{id}/read', [MessagesController::class, 'read'], $user);
     $r->post('/v1/stalls/{id}/conversation', [MessagesController::class, 'openWithStall'], $user);
     $r->post('/v1/merchant/clients/{id}/conversation', [MessagesController::class, 'openWithClient'], $merchant);

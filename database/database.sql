@@ -817,3 +817,25 @@ INSERT INTO settings (k, v, label, type) VALUES
   ('message_ttl_hours', '24', 'Messages effacés après ce délai si le client ne suit pas l''étal, heures', 'int');
 
 INSERT INTO schema_migrations (file, applied_at) VALUES ('002_commercants_messagerie_stock.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 003_messagerie_lu_en_ligne.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 003 : messagerie comme WhatsApp — reçu (✓✓ gris), lu (✓✓ bleu), « en ligne », message modifié ou supprimé.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+
+-- Dernière activité de l'application (en ligne = moins d'une minute)
+ALTER TABLE users ADD COLUMN last_seen_at DATETIME NULL AFTER merchant_welcome_pending;
+
+-- Messages arrivés sur le téléphone de chaque côté (l'application était ouverte)
+ALTER TABLE conversations
+  ADD COLUMN client_delivered_at DATETIME NULL AFTER merchant_read_at,
+  ADD COLUMN merchant_delivered_at DATETIME NULL AFTER client_delivered_at;
+
+ALTER TABLE messages
+  ADD COLUMN edited_at DATETIME NULL AFTER expires_at,
+  ADD COLUMN deleted_at DATETIME NULL AFTER edited_at;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('003_messagerie_lu_en_ligne.sql', UTC_TIMESTAMP());
