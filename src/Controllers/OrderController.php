@@ -34,6 +34,13 @@ final class OrderController
         Response::ok($quote);
     }
 
+    /**
+     * Commande et demande de paiement Mobile Money, sans jamais débiter deux fois :
+     * - même Idempotency-Key (en-tête ou champ idempotency_key) = même commande renvoyée ;
+     * - sans clé, même panier envoyé deux fois en 15 minutes = même commande renvoyée ;
+     * - verrou par client contre deux requêtes simultanées, un seul paiement par commande en base ;
+     * - la commande est enregistrée avant d'appeler le prestataire, avec une référence fixe.
+     */
     public function create(Request $req): never
     {
         [$lines, $reception] = $this->input($req);
@@ -45,6 +52,10 @@ final class OrderController
         $phone = is_string($payment['phone'] ?? null) ? Validator::phone($payment['phone']) : null;
         if ($phone === null) {
             throw new HttpException(422, 'INVALID_PHONE', 'Ce numéro Mobile Money ne semble pas valide.');
+        }
+        $key = $req->header('idempotency-key') ?? $req->input('idempotency_key');
+        if ($key !== null && (!is_string($key) || !preg_match('/^[A-Za-z0-9_-]{8,64}$/', $key))) {
+            Validator::fail(['idempotency_key' => '8 à 64 caractères : lettres, chiffres, - ou _.'], ['idempotency_key' => 'Clé de paiement']);
         }
 
         $detail = trim((string) ($reception['detail'] ?? ''));
@@ -58,52 +69,94 @@ final class OrderController
             throw new HttpException(422, 'RECEPTION_DETAIL_REQUIRED', $reception['mode'] === 'bus' ? 'Indiquez la ville de destination.' : 'Indiquez votre quartier et un repère.');
         }
 
-        $quote = $this->compute($lines, $reception['mode']);
-        if ($quote['unavailable_product_ids'] !== []) {
-            throw new HttpException(422, 'PRODUCT_UNAVAILABLE', 'Certains produits ne sont plus disponibles. Retirez-les du panier pour continuer.', ['unavailable_product_ids' => $quote['unavailable_product_ids']]);
-        }
+        // Empreinte du panier : produits triés, quantités, réception et téléphone de paiement
+        $normalized = array_map(static fn (array $l): string => $l['public_id'] . 'x' . $l['quantity'], $lines);
+        sort($normalized);
+        $hash = hash('sha256', json_encode([$normalized, $reception['mode'], $detail, $operator, $phone]));
         $provider = Payments::provider();
 
-        $orderId = Database::transaction(function () use ($req, $quote, $reception, $detail, $pointId, $operator, $phone): int {
-            $now = Clock::now();
-            $orderId = Database::insert(
-                'INSERT INTO orders (client_id, items_total, grouping_fee, reception_fee, total, reception_mode, reception_detail, axi_point_id, payment_operator, payment_phone, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                [$req->userId(), $quote['items_total'], $quote['grouping_fee'], $quote['reception_fee'], $quote['total'],
-                    $reception['mode'], mb_substr($detail, 0, 255), $pointId, $operator, $phone, $now],
-            );
-            foreach ($quote['_parts'] as $stallId => $items) {
-                $partId = Database::insert(
-                    'INSERT INTO order_stalls (order_id, stall_id, items_total, created_at) VALUES (?, ?, ?, ?)',
-                    [$orderId, $stallId, array_sum(array_column($items, 'line_total')), $now],
+        [$orderId, $replayed] = Database::withLock('axi_order_' . $req->userId(), 15, function () use ($req, $key, $hash, $lines, $reception, $detail, $pointId, $operator, $phone, $provider): array {
+            $existing = $key !== null
+                ? Database::one('SELECT id, request_hash FROM orders WHERE client_id = ? AND idempotency_key = ?', [$req->userId(), $key])
+                : Database::one(
+                    'SELECT id, request_hash FROM orders WHERE client_id = ? AND request_hash = ? AND status = \'awaiting_payment\' AND created_at > ? ORDER BY id DESC LIMIT 1',
+                    [$req->userId(), $hash, Clock::now(-15 * 60)],
                 );
-                foreach ($items as $item) {
-                    Database::run(
-                        'INSERT INTO order_items (order_stall_id, product_id, name, unit_price, quantity, line_total) VALUES (?, ?, ?, ?, ?, ?)',
-                        [$partId, $item['product_id'], $item['name'], $item['unit_price'], $item['quantity'], $item['line_total']],
-                    );
+            if ($existing !== null) {
+                if (!hash_equals((string) $existing['request_hash'], $hash)) {
+                    throw new HttpException(422, 'IDEMPOTENCY_KEY_REUSED', 'Cette demande de paiement a déjà servi pour un autre panier. Réessayez.');
                 }
+                return [(int) $existing['id'], true];
             }
-            return $orderId;
+
+            $quote = $this->compute($lines, $reception['mode']);
+            if ($quote['unavailable_product_ids'] !== []) {
+                throw new HttpException(422, 'PRODUCT_UNAVAILABLE', 'Certains produits ne sont plus disponibles. Retirez-les du panier pour continuer.', ['unavailable_product_ids' => $quote['unavailable_product_ids']]);
+            }
+            $orderId = Database::transaction(function () use ($req, $key, $hash, $quote, $reception, $detail, $pointId, $operator, $phone, $provider): int {
+                $now = Clock::now();
+                $orderId = Database::insert(
+                    'INSERT INTO orders (client_id, idempotency_key, request_hash, items_total, grouping_fee, reception_fee, total, reception_mode, reception_detail, axi_point_id, payment_operator, payment_phone, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    [$req->userId(), $key, $hash, $quote['items_total'], $quote['grouping_fee'], $quote['reception_fee'], $quote['total'],
+                        $reception['mode'], mb_substr($detail, 0, 255), $pointId, $operator, $phone, $now],
+                );
+                foreach ($quote['_parts'] as $stallId => $items) {
+                    $partId = Database::insert(
+                        'INSERT INTO order_stalls (order_id, stall_id, items_total, created_at) VALUES (?, ?, ?, ?)',
+                        [$orderId, $stallId, array_sum(array_column($items, 'line_total')), $now],
+                    );
+                    foreach ($items as $item) {
+                        Database::run(
+                            'INSERT INTO order_items (order_stall_id, product_id, name, unit_price, quantity, line_total) VALUES (?, ?, ?, ?, ?, ?)',
+                            [$partId, $item['product_id'], $item['name'], $item['unit_price'], $item['quantity'], $item['line_total']],
+                        );
+                    }
+                }
+                // Le paiement existe avant tout appel au prestataire ; sa référence ne changera plus
+                Database::run(
+                    'INSERT INTO payments (order_id, provider, reference, operator, phone, amount, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    [$orderId, $provider->name(), 'axi_pay_' . $orderId, $operator, $phone, $quote['total'], $now],
+                );
+                return $orderId;
+            });
+            return [$orderId, false];
         });
 
-        $init = $provider->initiate($orderId, $quote['total'], $operator, $phone);
-        Database::run(
-            'INSERT INTO payments (order_id, provider, provider_ref, operator, phone, amount, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [$orderId, $provider->name(), $init['ref'], $operator, $phone, $quote['total'], Clock::now()],
-        );
-        Response::ok($this->present($orderId, $init['instructions']), 201);
+        if ($replayed) {
+            header('Idempotent-Replayed: true');
+        }
+        $instructions = Payments::ensureInitiated($orderId);
+        Response::ok($this->present($orderId, $instructions), $replayed ? 200 : 201);
+    }
+
+    /** Le client confirme avoir reçu sa commande : l'argent gardé par Axi est libéré aux commerçants */
+    public function confirmReceipt(Request $req): never
+    {
+        $id = $this->ownOrder($req);
+        $status = (string) Database::value('SELECT status FROM orders WHERE id = ?', [$id]);
+        if (in_array($status, ['awaiting_payment', 'cancelled'], true)) {
+            throw new HttpException(409, 'ORDER_NOT_PAID', 'Cette commande n\'a pas été payée.');
+        }
+        Payments::release($id);
+        Response::ok($this->present($id));
     }
 
     public function show(Request $req): never
+    {
+        $id = $this->ownOrder($req);
+        Payments::refresh($id);
+        Response::ok($this->present($id));
+    }
+
+    private function ownOrder(Request $req): int
     {
         $id = $req->id('cmd', 'ORDER_NOT_FOUND', 'Commande introuvable.');
         $owner = Database::value('SELECT client_id FROM orders WHERE id = ?', [$id]);
         if ($owner === null || (int) $owner !== $req->userId()) {
             throw new HttpException(404, 'ORDER_NOT_FOUND', 'Commande introuvable.');
         }
-        Payments::refresh($id);
-        Response::ok($this->present($id));
+        return $id;
     }
 
     /** @return array{0: array<int, array{product_id: int, quantity: int, public_id: string}>, 1: array} */
@@ -188,6 +241,7 @@ final class OrderController
     private function present(int $orderId, ?string $instructions = null): array
     {
         $order = Database::one('SELECT * FROM orders WHERE id = ?', [$orderId]);
+        $sent = Database::value('SELECT provider_ref FROM payments WHERE order_id = ?', [$orderId]) !== null;
         $stalls = Database::all(
             'SELECT os.status, s.id, s.name FROM order_stalls os JOIN stalls s ON s.id = os.stall_id WHERE os.order_id = ? ORDER BY os.id',
             [$orderId],
@@ -197,9 +251,8 @@ final class OrderController
             'status' => $order['status'],
             'status_label' => self::STATUS_LABELS[$order['status']],
             'total' => (int) $order['total'],
-            'payment_instructions' => $order['status'] === 'awaiting_payment'
-                ? ($instructions ?? 'Un message de validation arrive sur votre téléphone. Entrez votre code secret Mobile Money pour confirmer.')
-                : null,
+            'payment_instructions' => $order['status'] !== 'awaiting_payment' ? null
+                : ($sent ? ($instructions ?? Payments::INSTRUCTIONS) : 'La demande de paiement n\'a pas pu partir. Réessayez : vous ne serez débité qu\'une seule fois.'),
             'stalls' => array_map(static fn (array $s): array => [
                 'id' => Ids::encode('stl', $s['id']),
                 'name' => $s['name'],

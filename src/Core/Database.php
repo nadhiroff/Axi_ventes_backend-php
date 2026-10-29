@@ -96,6 +96,22 @@ final class Database
         }
     }
 
+    /**
+     * Verrou MySQL nommé (GET_LOCK) : deux requêtes simultanées du même client attendent leur tour.
+     * Le verrou est libéré même en cas d'erreur.
+     */
+    public static function withLock(string $name, int $timeoutSeconds, callable $fn): mixed
+    {
+        if ((int) self::value('SELECT GET_LOCK(?, ?)', [$name, $timeoutSeconds]) !== 1) {
+            throw new HttpException(409, 'REQUEST_IN_PROGRESS', 'Une demande est déjà en cours. Patientez quelques secondes.');
+        }
+        try {
+            return $fn();
+        } finally {
+            self::value('SELECT RELEASE_LOCK(?)', [$name]);
+        }
+    }
+
     /** Liste de « ? » pour une clause IN */
     public static function in(array $values): string
     {

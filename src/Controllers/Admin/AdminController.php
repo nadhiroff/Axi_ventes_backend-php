@@ -190,6 +190,32 @@ final class AdminController
         Response::ok($product, 201);
     }
 
+    /**
+     * L'agent ou le coursier a récupéré la part d'un étal : { "stall_id": "stl_1" }.
+     * Sans stall_id, toutes les parts prêtes de la commande sont marquées récupérées.
+     */
+    public function pickup(Request $req): never
+    {
+        $orderId = $req->id('cmd', 'ORDER_NOT_FOUND', 'Commande introuvable.');
+        $order = Database::one('SELECT status FROM orders WHERE id = ?', [$orderId])
+            ?? throw new HttpException(404, 'ORDER_NOT_FOUND', 'Commande introuvable.');
+        if (in_array($order['status'], ['awaiting_payment', 'cancelled', 'delivered'], true)) {
+            throw new HttpException(409, 'ORDER_NOT_PREPARABLE', 'Cette commande ne peut pas être récupérée.');
+        }
+        $stallId = $req->input('stall_id') === null ? null : Ids::decode('stl', $req->input('stall_id'), 'STALL_NOT_FOUND', 'Cet étal ne fait pas partie de la commande.');
+        $updated = Database::run(
+            'UPDATE order_stalls SET status = \'picked_up\', picked_up_at = ? WHERE order_id = ? AND status IN (\'to_prepare\', \'ready\')'
+            . ($stallId === null ? ' AND status = \'ready\'' : ' AND stall_id = ?'),
+            $stallId === null ? [Clock::now(), $orderId] : [Clock::now(), $orderId, $stallId],
+        )->rowCount();
+        \Axi\Services\Orders::syncStatus($orderId);
+        AdminLog::record($req, 'order.pickup', 'order', $orderId, ['stall_id' => $stallId, 'parts' => $updated]);
+        Response::ok([
+            'status' => Database::value('SELECT status FROM orders WHERE id = ?', [$orderId]),
+            'picked_up' => $updated,
+        ]);
+    }
+
     /** {id} accepte l'étal (stl_…) ou le compte du commerçant (usr_…) */
     private function stallIdFromParam(Request $req): int
     {

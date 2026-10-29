@@ -25,9 +25,9 @@ if (extension_loaded('zlib') && !ini_get('zlib.output_compression')) {
 $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
 if ($origin !== '' && in_array($origin, Config::get('cors_origins', []), true)) {
     header('Access-Control-Allow-Origin: ' . $origin);
-    header('Access-Control-Allow-Headers: Authorization, Content-Type, If-None-Match');
+    header('Access-Control-Allow-Headers: Authorization, Content-Type, If-None-Match, Idempotency-Key');
     header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
-    header('Access-Control-Expose-Headers: ETag');
+    header('Access-Control-Expose-Headers: ETag, Idempotent-Replayed');
     header('Access-Control-Max-Age: 86400');
 }
 header('Vary: Origin', false);

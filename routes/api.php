@@ -5,6 +5,7 @@ use Axi\Controllers\Admin\AdminController;
 use Axi\Controllers\AgentVisitController;
 use Axi\Controllers\AuthController;
 use Axi\Controllers\CatalogController;
+use Axi\Controllers\CronController;
 use Axi\Controllers\Merchant\ClientsController;
 use Axi\Controllers\Merchant\MoneyController;
 use Axi\Controllers\Merchant\ProductsController;
@@ -52,6 +53,7 @@ return static function (Router $r): void {
     $r->post('/v1/orders/quote', [OrderController::class, 'quote'], Router::OPTIONAL);
     $r->post('/v1/orders', [OrderController::class, 'create'], $user);
     $r->get('/v1/orders/{id}', [OrderController::class, 'show'], $user);
+    $r->post('/v1/orders/{id}/confirm-receipt', [OrderController::class, 'confirmReceipt'], $user);
 
     // Commerçant
     $r->get('/v1/merchant/today', [TodayController::class, 'today'], $merchant);
@@ -79,6 +81,10 @@ return static function (Router $r): void {
     $r->get('/v1/admin/merchants/{id}', [AdminController::class, 'merchant'], $staff);
     $r->patch('/v1/admin/merchants/{id}', [AdminController::class, 'updateMerchant'], $staff);
     $r->post('/v1/admin/stalls/{id}/products', [AdminController::class, 'createProduct'], $staff);
+    $r->post('/v1/admin/orders/{id}/pickup', [AdminController::class, 'pickup'], $staff);
+
+    // Tâche planifiée appelée par URL (hébergement sans SSH) : /v1/internal/cron?key=<cron_key>
+    $r->get('/v1/internal/cron', [CronController::class, 'run']);
 
     // Axi Pro : données agrégées et anonymes (le type d'organisation est vérifié dans le contrôleur)
     $r->get('/v1/pro/overview', [ProController::class, 'overview'], $pro);
