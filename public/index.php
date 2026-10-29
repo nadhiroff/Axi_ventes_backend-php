@@ -7,6 +7,7 @@ use Axi\Core\Logger;
 use Axi\Core\Request;
 use Axi\Core\Response;
 use Axi\Core\Router;
+use Axi\Web\WebError;
 
 // Serveur intégré (php -S) : les fichiers existants (photos) sont servis directement
 if (PHP_SAPI === 'cli-server' && is_file(__DIR__ . parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH))) {
@@ -37,13 +38,24 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
     exit;
 }
 
+// Espace web partenaire (/pro et la racine) : réponses HTML ; tout le reste : API JSON
+$isWeb = false;
 try {
+    $request = Request::fromGlobals();
+    $isWeb = $request->path === '/' || $request->path === '/pro' || str_starts_with($request->path, '/pro/');
     $router = new Router();
-    (require BASE_PATH . '/routes/api.php')($router);
-    $router->dispatch(Request::fromGlobals());
+    (require BASE_PATH . '/routes/' . ($isWeb ? 'web' : 'api') . '.php')($router);
+    $router->dispatch($request);
 } catch (HttpException $e) {
+    if ($isWeb) {
+        WebError::show($e->status, $e->getMessage());
+    }
     Response::error($e->errorCode, $e->getMessage(), $e->status, $e->details, $e->headers);
 } catch (Throwable $e) {
     Logger::write('error', get_class($e) . ': ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
-    Response::error('SERVER_ERROR', Config::isLocal() ? $e->getMessage() : 'Erreur du serveur. Réessayez dans un instant.', 500);
+    $message = Config::isLocal() ? $e->getMessage() : 'Erreur du serveur. Réessayez dans un instant.';
+    if ($isWeb) {
+        WebError::show(500, $message);
+    }
+    Response::error('SERVER_ERROR', $message, 500);
 }
