@@ -1,10 +1,11 @@
+# Secrets : jamais versionnés
+/.env
 /config/config.local.php
+/vendor/
 /storage/logs/*
 !/storage/logs/.gitkeep
-/public/uploads/images/*
-!/public/uploads/images/.gitkeep
-/public/uploads/audio/*
-!/public/uploads/audio/.gitkeep
+/public/uploads/*
+!/public/uploads/.htaccess
 .DS_Store
 .idea/
 .vscode/
