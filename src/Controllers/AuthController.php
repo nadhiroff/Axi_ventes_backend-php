@@ -119,7 +119,9 @@ final class AuthController
             'SELECT SUM(email = ?) AS by_email, SUM(ip = ?) AS by_ip FROM login_failures WHERE created_at > ? AND (email = ? OR ip = ?)',
             [$in['email'], $req->ip(), $since, $in['email'], $req->ip()],
         );
-        if ((int) $failures['by_email'] >= $max || (int) $failures['by_ip'] >= $max) {
+        // En local, la machine elle-même (tests/smoke.sh) n'est pas limitée par adresse IP
+        $ipLimited = !(Config::isLocal() && in_array($req->ip(), ['127.0.0.1', '::1'], true));
+        if ((int) $failures['by_email'] >= $max || ($ipLimited && (int) $failures['by_ip'] >= $max)) {
             $minutes = (int) ceil($window / 60);
             throw new HttpException(429, 'TOO_MANY_REQUESTS', "Trop de tentatives de connexion. Réessayez dans $minutes minutes.", ['retry_after' => $window]);
         }
