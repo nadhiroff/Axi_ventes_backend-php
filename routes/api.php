@@ -2,10 +2,12 @@
 declare(strict_types=1);
 
 use Axi\Controllers\AccountController;
+use Axi\Controllers\ApplicationController;
 use Axi\Controllers\AuthController;
 use Axi\Controllers\CatalogController;
 use Axi\Controllers\CronController;
 use Axi\Controllers\MediaController;
+use Axi\Controllers\MessagesController;
 use Axi\Controllers\Merchant\ClientsController;
 use Axi\Controllers\Merchant\MoneyController;
 use Axi\Controllers\Merchant\StallController;
@@ -51,6 +53,22 @@ return static function (Router $r): void {
     $r->post('/v1/me/export', [AccountController::class, 'exportLink'], $user);
     $r->get('/v1/me/export.json', [AccountController::class, 'export']);
     $r->post('/v1/me/delete', [AccountController::class, 'deleteAccount'], $user);
+    $r->post('/v1/me/avatar', [AccountController::class, 'avatar'], $user);
+    $r->delete('/v1/me/avatar', [AccountController::class, 'deleteAvatar'], $user);
+    $r->get('/v1/me/badges', [MessagesController::class, 'badges'], $user);
+
+    // Devenir commerçant : demande vérifiée par un agent Axi dans l'espace web
+    $r->get('/v1/me/merchant-application', [ApplicationController::class, 'show'], $user);
+    $r->post('/v1/me/merchant-application', [ApplicationController::class, 'create'], $user);
+    $r->post('/v1/me/merchant-welcome/seen', [ApplicationController::class, 'welcomeSeen'], $user);
+
+    // Messagerie client ↔ commerçant (effacée après 24 h sauf si le client suit l'étal)
+    $r->get('/v1/conversations', [MessagesController::class, 'index'], $user);
+    $r->get('/v1/conversations/{id}/messages', [MessagesController::class, 'messages'], $user);
+    $r->post('/v1/conversations/{id}/messages', [MessagesController::class, 'send'], $user);
+    $r->post('/v1/conversations/{id}/read', [MessagesController::class, 'read'], $user);
+    $r->post('/v1/stalls/{id}/conversation', [MessagesController::class, 'openWithStall'], $user);
+    $r->post('/v1/merchant/clients/{id}/conversation', [MessagesController::class, 'openWithClient'], $merchant);
     $r->get('/v1/notifications', [AccountController::class, 'notifications'], $user);
     $r->post('/v1/notifications/read', [AccountController::class, 'readNotifications'], $user);
     $r->get('/v1/favorites', [AccountController::class, 'favorites'], $user);
@@ -91,8 +109,7 @@ return static function (Router $r): void {
     $r->get('/v1/media/audio', [MediaController::class, 'audio']);
 
     // Commerçant
-    $r->get('/v1/merchant/stall-options', [StallController::class, 'options'], $merchant);
-    $r->post('/v1/merchant/stall', [StallController::class, 'create'], $merchant);
+    $r->get('/v1/merchant/stall-options', [StallController::class, 'options'], $user);
     $r->get('/v1/merchant/stall', [StallController::class, 'show'], $merchant);
     $r->patch('/v1/merchant/stall', [StallController::class, 'update'], $merchant);
     $r->post('/v1/merchant/stall/photo', [StallController::class, 'photo'], $merchant);
