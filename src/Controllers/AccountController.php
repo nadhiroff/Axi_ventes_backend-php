@@ -328,6 +328,8 @@ final class AccountController
             'preferred_point_id' => Ids::encode('pt', $s['preferred_point_id']),
             'preferred_operator' => $s['preferred_operator'],
             'preferred_payment_phone' => $s['preferred_payment_phone'],
+            // Points de retrait disponibles, pour choisir le point préféré
+            'axi_points' => array_map(static fn (array $pt): array => ['id' => Ids::encode('pt', $pt['id']), 'name' => $pt['name'], 'address' => $pt['address']], Database::all('SELECT * FROM axi_points WHERE active = 1 ORDER BY sort_order, id')),
             'data' => [
                 'cap_mb' => (int) $s['data_cap_mb'],
                 'used_bytes' => $used,
