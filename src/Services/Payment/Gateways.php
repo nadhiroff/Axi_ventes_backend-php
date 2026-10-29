@@ -12,6 +12,11 @@ final class Gateways
     /** Passerelle active (payments.provider), ou celle qui a créé un paiement existant */
     public static function get(?string $name = null): Gateway
     {
+        // Tests automatiques (tests/simulation.php) : passerelle factice, en local et depuis la machine elle-même seulement
+        if ($name === null && Config::isLocal() && ($_SERVER['HTTP_X_AXI_TEST_GATEWAY'] ?? '') === 'fake'
+            && in_array($_SERVER['REMOTE_ADDR'] ?? '', ['127.0.0.1', '::1'], true)) {
+            $name = 'fake';
+        }
         $name ??= (string) Config::get('payments.provider', 'fedapay');
         try {
             return match ($name) {
