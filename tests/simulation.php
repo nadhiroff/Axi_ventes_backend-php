@@ -107,12 +107,12 @@ function lastCode(string $email, string $purpose): ?string
     return null;
 }
 
-/** Crée un compte confirmé (client ou commerçant) et renvoie [jeton, id numérique, email] */
-function newAccount(string $tag, string $profile): array
+/** Crée un compte confirmé (toujours client) et renvoie [jeton, id numérique, email] */
+function newAccount(string $tag): array
 {
     global $stamp;
     $email = "sim-$tag-$stamp@example.com";
-    call('POST', '/v1/auth/register', ['first_name' => 'Sim', 'last_name' => ucfirst($tag), 'email' => $email, 'password' => 'simulation-123', 'profile' => $profile]);
+    call('POST', '/v1/auth/register', ['first_name' => 'Sim', 'last_name' => ucfirst($tag), 'email' => $email, 'password' => 'simulation-123', 'password_confirmation' => 'simulation-123']);
     $r = call('POST', '/v1/auth/verify-email', ['email' => $email, 'code' => lastCode($email, 'verify_email'), 'device' => 'simulation']);
     return [(string) ($r['body']['data']['token'] ?? ''), (int) substr((string) ($r['body']['data']['user']['id'] ?? 'usr_0'), 4), $email];
 }
@@ -127,6 +127,18 @@ function webLogin(string $email, string $password): string
     call('POST', '/pro/connexion', ['_csrf' => $m[1] ?? '', 'email' => $email, 'password' => $password], null, [], false, true);
     preg_match('/name="_csrf" value="([^"]+)"/', call('GET', '/pro', null, null, [], false, true)['raw'], $m);
     return $m[1] ?? '';
+}
+
+/** Demande « Devenir commerçant » envoyée depuis l'app puis acceptée par l'agent Axi (session web $csrf). @return int id de l'étal */
+function becomeMerchant(string $token, string $name, string $site, string $aisle, string $type, string $csrf): int
+{
+    global $photo;
+    $r = call('POST', '/v1/me/merchant-application', ['phone' => '0197' . random_int(100000, 999999), 'id_type' => 'cni', 'id_number' => 'SIM' . random_int(1000, 9999), 'stall_name' => $name,
+        'merchant_type' => $type, 'site_id' => $site, 'aisle_id' => $aisle, 'row' => 'Allée S', 'stand' => '7',
+        'id_front' => new CURLFile($photo, 'image/webp'), 'selfie' => new CURLFile($photo, 'image/webp'), 'stall_photo' => new CURLFile($photo, 'image/webp')], $token, [], true);
+    $applicationId = id((string) ($r['body']['data']['application']['id'] ?? 'dem_0'));
+    call('POST', "/pro/demandes/$applicationId/accepter", ['_csrf' => $csrf, 'stall_name' => $name, 'site_id' => $site, 'aisle_id' => $aisle], null, [], false, true);
+    return id((string) (call('GET', '/v1/me', null, $token)['body']['data']['merchant']['stall_id'] ?? 'stl_0'));
 }
 
 function debits(string $reference): int
@@ -154,12 +166,14 @@ echo "Simulation Axi contre $api\n";
 // ---------------------------------------------------------------------------
 section('1. Comptes : email et mot de passe uniquement');
 $email = "sim-auth-$stamp@example.com";
-$r = call('POST', '/v1/auth/register', ['first_name' => ' Afi ', 'last_name' => 'Houngbo', 'email' => strtoupper($email), 'password' => 'motdepasse-1', 'profile' => 'client']);
+$r = call('POST', '/v1/auth/register', ['first_name' => ' Afi ', 'last_name' => 'Houngbo', 'email' => strtoupper($email), 'password' => 'motdepasse-1', 'password_confirmation' => 'motdepasse-1']);
 check('inscription client sans téléphone : 201, compte non confirmé', $r['status'] === 201 && $r['body']['data']['user']['role'] === 'client' && $r['body']['data']['user']['phone'] === null, $r['raw']);
 $user = Database::one('SELECT * FROM users WHERE email = ?', [$email]);
 check('base : email en minuscules, mot de passe haché, paramètres créés', $user !== null && $user['first_name'] === 'Afi' && str_starts_with($user['password_hash'], '$2y$')
     && Database::value('SELECT user_id FROM user_settings WHERE user_id = ?', [$user['id'] ?? 0]) !== null);
-check('profil invalide refusé (seuls client et commerçant s\'inscrivent)', call('POST', '/v1/auth/register', ['first_name' => 'X', 'last_name' => 'Y', 'email' => "p-$email", 'password' => 'motdepasse-1', 'profile' => 'partner'])['status'] === 422);
+check('confirmation du mot de passe différente : refusée', call('POST', '/v1/auth/register', ['first_name' => 'X', 'last_name' => 'Y', 'email' => "c-$email", 'password' => 'motdepasse-1', 'password_confirmation' => 'motdepasse-2'])['status'] === 422);
+$r = call('POST', '/v1/auth/register', ['first_name' => 'X', 'last_name' => 'Y', 'email' => "p-$email", 'password' => 'motdepasse-1', 'profile' => 'merchant']);
+check('impossible de s\'inscrire directement commerçant ou partenaire : toujours client', ($r['body']['data']['user']['role'] ?? '') === 'client', $r['raw']);
 check('aucune route de connexion par téléphone ou SMS', call('POST', '/v1/auth/otp', ['phone' => '+22997000000'])['status'] === 404 && call('POST', '/v1/auth/verify', [])['status'] === 404);
 $code = lastCode($email, 'verify_email');
 check('base : code stocké en HMAC, pas en clair', Database::value('SELECT code_hash FROM email_codes WHERE email = ? ORDER BY id DESC LIMIT 1', [$email]) !== $code);
@@ -184,15 +198,56 @@ call('POST', '/v1/auth/logout-all', null, $token);
 check('déconnexion de tous les appareils', call('GET', '/v1/me', null, $token)['status'] === 401 && call('GET', '/v1/me', null, $second)['status'] === 401);
 
 // ---------------------------------------------------------------------------
-section('2. Commerçant : inscription, étal, produits en photo et en vocal');
-[$merchant, $merchantId, $merchantEmail] = newAccount('commercante', 'merchant');
-check('inscription commerçant : rôle merchant, sans étal', call('GET', '/v1/me', null, $merchant)['body']['data']['merchant']['has_stall'] === false);
-check('espace commerçant sans étal : 404 STALL_REQUIRED', call('GET', '/v1/merchant/today', null, $merchant)['body']['error']['code'] === 'STALL_REQUIRED');
+section('2. Devenir commerçant : demande depuis l\'app, validation par un agent Axi sur le web');
+[$merchant, $merchantId, $merchantEmail] = newAccount('commercante');
+check('le compte créé est un compte client', call('GET', '/v1/me', null, $merchant)['body']['data']['role'] === 'client');
+check('espace commerçant interdit à un client (403)', call('GET', '/v1/merchant/today', null, $merchant)['status'] === 403);
 $options = call('GET', '/v1/merchant/stall-options', null, $merchant)['body']['data'] ?? [];
-check('listes des sites et allées (gérées en base)', count($options['sites'] ?? []) >= 4 && count($options['aisles'] ?? []) >= 7);
-$r = call('POST', '/v1/merchant/stall', ['name' => "Étal sim $stamp", 'tagline' => 'Pagnes et bazin', 'site_id' => 'yoyo', 'aisle_id' => 'tissus', 'row' => 'Allée S', 'stand' => '7', 'merchant_type' => 'wholesale', 'pay_on_delivery' => true, 'phone' => '0197' . substr($stamp, -6)], $merchant);
-$stallId = id((string) ($r['body']['data']['stall']['id'] ?? 'stl_0'));
-check('création de l\'étal : non vérifié, vérification demandée à un agent', $r['status'] === 201 && $r['body']['data']['stall']['verified'] === false && $r['body']['data']['stall']['verification_requested'] === true, $r['raw']);
+check('listes des marchés et allées (en base, « Autre » proposé à part)', count($options['sites'] ?? []) >= 4 && count($options['aisles'] ?? []) >= 7 && ($options['other_aisle_id'] ?? '') === 'autres');
+$r = call('POST', '/v1/me/merchant-application', ['phone' => '0197' . substr($stamp, -6), 'id_type' => 'cni', 'id_number' => 'AB12', 'stall_name' => "Étal sim $stamp", 'site_id' => 'yoyo', 'aisle_id' => 'tissus'], $merchant, [], true);
+check('demande sans pièce d\'identité ni photos : refusée', $r['status'] === 422 && isset($r['body']['error']['fields']['id_front'], $r['body']['error']['fields']['selfie']), $r['raw']);
+$r = call('POST', '/v1/me/merchant-application', ['phone' => '0197' . substr($stamp, -6), 'id_type' => 'cni', 'id_number' => 'AB12', 'stall_name' => "Étal sim $stamp", 'merchant_type' => 'wholesale',
+    'site_id' => 'yoyo', 'aisle_id' => 'autres', 'aisle_other' => "Chaussures $stamp", 'row' => 'Allée S', 'stand' => '7',
+    'id_front' => new CURLFile($photo, 'image/webp'), 'selfie' => new CURLFile($photo, 'image/webp'), 'stall_photo' => new CURLFile($photo, 'image/webp')], $merchant, [], true);
+$applicationId = id((string) ($r['body']['data']['application']['id'] ?? 'dem_0'));
+check('demande complète envoyée : en attente', $r['status'] === 201 && $r['body']['data']['application']['status'] === 'pending', $r['raw']);
+$idFront = (string) Database::value('SELECT id_front_path FROM merchant_applications WHERE id = ?', [$applicationId]);
+check('pièce d\'identité gardée hors de public/ et jamais servie publiquement', str_starts_with($idFront, 'private/') && is_file(BASE_PATH . '/storage/' . $idFront) && call('GET', '/storage/' . $idFront)['status'] !== 200);
+check('deuxième demande pendant l\'examen : 409', call('POST', '/v1/me/merchant-application', ['phone' => '0197000000'], $merchant, [], true)['status'] === 409);
+$page = call('GET', '/pro/connexion', null, null, [], false, true)['raw'];
+preg_match('/name="_csrf" value="([^"]+)"/', $page, $m);
+check('client refusé sur l\'espace web partenaire', str_contains(call('POST', '/pro/connexion', ['_csrf' => $m[1] ?? '', 'email' => $merchantEmail, 'password' => 'simulation-123'], null, [], false, true)['raw'], 'réservé aux partenaires'));
+$csrf = webLogin('partenaire@example.com', 'Partenaire-2026!');
+check('connexion web de l\'agent Axi', $csrf !== '' && str_contains(call('GET', '/pro', null, null, [], false, true)['raw'], 'Bonjour Agent'));
+check('la demande apparaît dans « Demandes commerçants »', str_contains(call('GET', '/pro/demandes', null, null, [], false, true)['raw'], "Étal sim $stamp"));
+$fiche = call('GET', "/pro/demandes/$applicationId", null, null, [], false, true)['raw'];
+preg_match('#/pro/fichier\?p=[^"]+#', $fiche, $fm);
+check('l\'agent voit la pièce d\'identité (lien lié à sa session)', isset($fm[0]) && call('GET', html_entity_decode($fm[0]), null, null, [], false, true)['status'] === 200);
+check('formulaire sans jeton CSRF refusé', call('POST', "/pro/demandes/$applicationId/accepter", ['stall_name' => 'x'], null, [], false, true)['status'] === 419);
+call('POST', "/pro/demandes/$applicationId/accepter", ['_csrf' => $csrf, 'stall_name' => "Étal sim $stamp", 'site_id' => 'yoyo', 'aisle_id' => 'new'], null, [], false, true);
+call('POST', "/pro/demandes/$applicationId/accepter", ['_csrf' => $csrf, 'stall_name' => "Étal sim $stamp", 'site_id' => 'yoyo', 'aisle_id' => 'new'], null, [], false, true);
+$me = call('GET', '/v1/me', null, $merchant)['body']['data'] ?? [];
+$stallId = id((string) ($me['merchant']['stall_id'] ?? 'stl_0'));
+check('acceptée : compte commerçant, étal créé et vérifié', ($me['role'] ?? '') === 'merchant' && $me['merchant']['verified'] === true && $stallId > 0, json_encode($me));
+check('double validation : un seul étal, une seule allée créée', (int) Database::value('SELECT COUNT(*) FROM stalls WHERE user_id = ?', [$merchantId]) === 1
+    && (int) Database::value('SELECT COUNT(*) FROM aisles WHERE name = ?', ["Chaussures $stamp"]) === 1);
+check('allée « Autre » proposée créée pour tout le monde', Database::value('SELECT aisle_id FROM stalls WHERE id = ?', [$stallId]) === (string) Database::value('SELECT id FROM aisles WHERE name = ?', ["Chaussures $stamp"]));
+Database::run('UPDATE stalls SET aisle_id = \'tissus\' WHERE id = ?', [$stallId]);
+check('félicitations par email + message unique dans l\'app', ($me['merchant_welcome'] ?? false) === true
+    && Database::value("SELECT COUNT(*) FROM notifications WHERE user_id = ? AND title = 'Félicitations, vous êtes commerçant Axi !'", [$merchantId]) === 1);
+call('POST', '/v1/me/merchant-welcome/seen', null, $merchant);
+check('message de félicitations vu : plus affiché', call('GET', '/v1/me', null, $merchant)['body']['data']['merchant_welcome'] === false);
+check('action journalisée (admin_actions)', Database::value("SELECT COUNT(*) FROM admin_actions WHERE action = 'application.approve' AND target_id = ?", [$merchantId]) === 1);
+[$refused] = newAccount('refusee');
+$r = call('POST', '/v1/me/merchant-application', ['phone' => '0196' . substr($stamp, -6), 'id_type' => 'passport', 'id_number' => 'P9', 'stall_name' => 'Refus', 'site_other' => 'Marché de Bohicon', 'aisle_id' => 'tissus',
+    'id_front' => new CURLFile($photo, 'image/webp'), 'selfie' => new CURLFile($photo, 'image/webp'), 'stall_photo' => new CURLFile($photo, 'image/webp')], $refused, [], true);
+$refusedApp = id((string) ($r['body']['data']['application']['id'] ?? 'dem_0'));
+call('POST', "/pro/demandes/$refusedApp/refuser", ['_csrf' => $csrf, 'reason' => 'La pièce d\'identité est illisible.'], null, [], false, true);
+$me = call('GET', '/v1/me', null, $refused)['body']['data'] ?? [];
+check('demande refusée : reste client, motif visible, peut renvoyer', $me['role'] === 'client' && ($me['merchant_application']['status'] ?? '') === 'rejected' && str_contains((string) $me['merchant_application']['reject_reason'], 'illisible'));
+
+section('3. Étal et produits : photos, vocal, stock, emplacement');
+call('PATCH', '/v1/merchant/stall', ['tagline' => 'Pagnes et bazin', 'pay_on_delivery' => true], $merchant);
 $r = call('POST', '/v1/merchant/stall/photo', ['photo' => new CURLFile($photo, 'image/webp')], $merchant, [], true);
 check('photo de l\'étal', ($r['body']['data']['stall']['avatar']['medium_url'] ?? null) !== null, $r['raw']);
 $r = call('POST', '/v1/merchant/products', ['name' => 'Wax hollandais, 6 yards', 'price' => '18000', 'is_today' => '1', 'photos[0]' => new CURLFile($photo, 'image/webp'), 'photos[1]' => new CURLFile($photo, 'image/webp')], $merchant, [], true);
@@ -212,34 +267,23 @@ check('le commerçant fixe lui-même son prix', (int) Database::value('SELECT pr
 $r = call('POST', '/v1/merchant/products', ['name' => 'Pagne tissé', 'price' => '', 'is_today' => '0'], $merchant, [], true);
 $debatId = id((string) ($r['body']['data']['id'] ?? 'prd_0'));
 check('produit « Prix à débattre »', $r['status'] === 201 && $r['body']['data']['price'] === null);
-
-// ---------------------------------------------------------------------------
-section('3. Espace web : un agent Axi vérifie l\'étal sur place, le badge apparaît dans l\'app');
-check('page publique avant vérification : pas de badge', call('GET', "/v1/stalls/stl_$stallId")['body']['data']['stall']['verified'] === false);
-$page = call('GET', '/pro/connexion', null, null, [], false, true)['raw'];
-preg_match('/name="_csrf" value="([^"]+)"/', $page, $m);
-check('commerçant refusé sur l\'espace web partenaire', str_contains(call('POST', '/pro/connexion', ['_csrf' => $m[1] ?? '', 'email' => $merchantEmail, 'password' => 'simulation-123'], null, [], false, true)['raw'], 'réservé aux partenaires'));
-$csrf = webLogin('partenaire@example.com', 'Partenaire-2026!');
-check('connexion web de l\'agent Axi', $csrf !== '' && str_contains(call('GET', '/pro', null, null, [], false, true)['raw'], 'Bonjour Agent'));
-check('la vérification à faire apparaît dans l\'espace web', str_contains(call('GET', '/pro/verifications', null, null, [], false, true)['raw'], "Étal sim $stamp"));
-check('formulaire sans jeton CSRF refusé', call('POST', "/pro/commercants/$stallId/verifier", ['row' => 'A'], null, [], false, true)['status'] === 419);
-$r = call('POST', "/pro/commercants/$stallId/verifier", ['_csrf' => $csrf, 'row' => 'Allée S', 'stand' => '7', 'photo' => new CURLFile($photo, 'image/webp')], null, [], false, true);
-check('vérification avec photo à l\'emplacement réel', in_array($r['status'], [302, 303], true) && Database::value('SELECT verified_at FROM stalls WHERE id = ?', [$stallId]) !== null
-    && Database::value('SELECT verification_photo_path FROM stalls WHERE id = ?', [$stallId]) !== null, (string) $r['status']);
-check('badge « vérifié » visible dans l\'application', call('GET', "/v1/stalls/stl_$stallId")['body']['data']['stall']['verification']['by'] === 'agent');
-check('action journalisée (admin_actions) et commerçant notifié', Database::value("SELECT COUNT(*) FROM admin_actions WHERE action = 'stall.verify' AND target_id = ?", [$stallId]) === 1
-    && Database::value("SELECT COUNT(*) FROM notifications WHERE user_id = ? AND title = 'Votre étal est vérifié'", [$merchantId]) === 1);
+$r = call('POST', '/v1/merchant/products', ['name' => 'Foulard en soie', 'price' => '3000', 'stock_quantity' => '2'], $merchant, [], true);
+$scarfId = id((string) ($r['body']['data']['id'] ?? 'prd_0'));
+check('produit avec stock : quantité enregistrée', ($r['body']['data']['stock_quantity'] ?? null) === 2, $r['raw']);
 $r = call('PATCH', '/v1/merchant/stall', ['stand' => '9'], $merchant);
 check('le commerçant déménage : badge retiré jusqu\'à une nouvelle visite', $r['body']['data']['stall']['verified'] === false && $r['body']['data']['stall']['location']['moved_at'] !== null, $r['raw']);
-call('POST', "/pro/commercants/$stallId/verifier", ['_csrf' => $csrf, 'row' => 'Allée S', 'stand' => '9', 'photo' => new CURLFile($photo, 'image/webp')], null, [], false, true);
-check('nouvelle vérification : badge rendu', call('GET', "/v1/stalls/stl_$stallId")['body']['data']['stall']['verified'] === true);
+check('la vérification à faire apparaît dans l\'espace web', str_contains(call('GET', '/pro/verifications', null, null, [], false, true)['raw'], "Étal sim $stamp"));
+$r = call('POST', "/pro/commercants/$stallId/verifier", ['_csrf' => $csrf, 'row' => 'Allée S', 'stand' => '9'], null, [], false, true);
+check('nouvelle vérification sans nouvelle photo (facultative) : badge rendu', in_array($r['status'], [302, 303], true) && call('GET', "/v1/stalls/stl_$stallId")['body']['data']['stall']['verified'] === true
+    && Database::value('SELECT verification_photo_path FROM stalls WHERE id = ?', [$stallId]) !== null, (string) $r['status']);
+check('commerçant notifié de la vérification', Database::value("SELECT COUNT(*) FROM notifications WHERE user_id = ? AND title = 'Votre étal est vérifié'", [$merchantId]) === 1);
 
 // ---------------------------------------------------------------------------
 section('4. Client : visite, favoris, panier multi-étals, paiement unique, jamais deux débits');
-[$second, $secondId] = newAccount('commercant2', 'merchant');
-call('POST', '/v1/merchant/stall', ['name' => "Grains sim $stamp", 'site_id' => 'daho', 'aisle_id' => 'vivriers', 'stand' => '3'], $second);
+[$second, $secondId] = newAccount('commercant2');
+becomeMerchant($second, "Grains sim $stamp", 'daho', 'vivriers', 'retail', $csrf);
 $rice = id((string) (call('POST', '/v1/merchant/products', ['name' => 'Sac de riz, 25 kg', 'price' => '17500', 'is_today' => '1'], $second, [], true)['body']['data']['id'] ?? 'prd_0'));
-[$client, $clientId] = newAccount('cliente', 'client');
+[$client, $clientId] = newAccount('cliente');
 check('visiteur : accueil et fiche produit sans compte', call('GET', '/v1/home')['status'] === 200 && call('GET', "/v1/products/prd_$waxId")['body']['data']['images'][0]['medium_url'] !== null);
 check('visiteur : commander exige un compte (401)', call('POST', '/v1/orders', ['lines' => [['product_id' => "prd_$waxId", 'quantity' => 1]], 'reception' => ['mode' => 'delivery', 'detail' => 'x']])['status'] === 401);
 call('GET', "/v1/products/prd_$waxId", null, $client);
@@ -321,29 +365,125 @@ check('décision : remboursement total (articles et frais)', Database::value('SE
 check('client notifié de la décision', Database::value("SELECT COUNT(*) FROM notifications WHERE user_id = ? AND title = 'Votre litige a été examiné'", [$clientId]) === 1);
 
 // ---------------------------------------------------------------------------
-section('7. Clients du commerçant, relances sans SMS, abonnement, crédit');
+section('7. Abonnement au mois ou à l\'année, limites sans abonnement, clients, crédit');
 $clients = call('GET', '/v1/merchant/clients', null, $merchant)['body']['data']['clients'] ?? [];
 $cli = $clients[0]['id'] ?? 'cli_0';
 $fiche = call('GET', "/v1/merchant/clients/$cli", null, $merchant)['body']['data'] ?? [];
 check('fiche client avec historique des commandes', ($fiche['has_axi_account'] ?? false) === true && count($fiche['orders'] ?? []) >= 1, json_encode($fiche));
+$r = call('POST', "/v1/merchant/clients/$cli/follow-up", null, $merchant);
+check('sans abonnement : relance refusée (402) avec explication', $r['status'] === 402 && $r['body']['error']['code'] === 'SUBSCRIPTION_REQUIRED', $r['raw']);
+$sub = call('GET', '/v1/merchant/money', null, $merchant)['body']['data']['subscription'] ?? [];
+check('limites et prix annoncés (mois, année −5 %)', ($sub['limits']['product_limit'] ?? 0) === 5 && $sub['prices']['month'] === 5000 && $sub['prices']['year'] === 57000 && $sub['prices']['year_discount_pct'] === 5, json_encode($sub));
+for ($i = 1; $i <= 1; $i++) {
+    call('POST', '/v1/merchant/products', ['name' => "Article $i", 'price' => '1000'], $merchant, [], true);
+}
+$r = call('POST', '/v1/merchant/products', ['name' => 'Article de trop', 'price' => '1000'], $merchant, [], true);
+check('sans abonnement : 6e produit en vente refusé (402)', $r['status'] === 402 && $r['body']['error']['code'] === 'SUBSCRIPTION_REQUIRED', $r['raw']);
+$r = call('POST', '/v1/merchant/subscription/pay', ['period' => 'month'], $merchant);
+$subRef = (string) ($r['body']['data']['reference'] ?? '');
+check('abonnement mensuel grossiste (5 000 en base) : lien de paiement', ($r['body']['data']['amount'] ?? 0) === 5000 && $r['body']['data']['payment_url'] !== null, $r['raw']);
+check('double appui sur « Payer l\'abonnement » : même paiement', (call('POST', '/v1/merchant/subscription/pay', ['period' => 'month'], $merchant)['body']['data']['reference'] ?? '') === $subRef);
+$r = call('POST', '/v1/merchant/subscription/verify', ['reference' => $subRef], $merchant);
+check('abonnement payé et actif', ($r['body']['data']['subscription']['status'] ?? '') === 'active' && $r['body']['data']['subscription']['limits']['product_limit'] === null, $r['raw']);
+check('abonné : produits sans limite', call('POST', '/v1/merchant/products', ['name' => 'Article de trop', 'price' => '1000'], $merchant, [], true)['status'] === 201);
+$r = call('POST', '/v1/merchant/subscription/pay', ['period' => 'year'], $merchant);
+$yearRef = (string) ($r['body']['data']['reference'] ?? '');
+check('abonnement annuel : 12 mois −5 % (57 000)', ($r['body']['data']['amount'] ?? 0) === 57000 && $r['body']['data']['period'] === 'year', $r['raw']);
+$before = (string) Database::value("SELECT MAX(ends_on) FROM subscriptions WHERE stall_id = ? AND status = 'active'", [$stallId]);
+call('POST', '/v1/merchant/subscription/verify', ['reference' => $yearRef], $merchant);
+$after = (string) Database::value("SELECT MAX(ends_on) FROM subscriptions WHERE stall_id = ? AND status = 'active'", [$stallId]);
+check('l\'année s\'ajoute après le mois en cours (365 jours)', (int) round((strtotime($after) - strtotime($before)) / 86400) === 365, "$before → $after");
 $r = call('POST', "/v1/merchant/clients/$cli/follow-up", null, $merchant);
 check('relance : notification dans l\'app + lien WhatsApp (aucun SMS)', ($r['body']['data']['notified'] ?? 0) === 1 && str_starts_with((string) $r['body']['data']['whatsapp_url'], 'https://wa.me/'), $r['raw']);
 $r = call('POST', '/v1/merchant/clients', ['display_name' => 'Tantine Rose', 'email' => "rose-$stamp@example.com", 'kind' => 'reseller'], $merchant);
 check('ajout manuel d\'un client (email, sans téléphone)', $r['status'] === 201, $r['raw']);
 $r = call('POST', '/v1/merchant/relocation/broadcast', null, $merchant);
 check('nouvelle adresse : app + email + lien WhatsApp', ($r['body']['data']['recipients'] ?? 0) === 2 && $r['body']['data']['notified'] === 1 && $r['body']['data']['emailed'] >= 1, $r['raw']);
-$r = call('POST', '/v1/merchant/subscription/pay', null, $merchant);
-$subRef = (string) ($r['body']['data']['reference'] ?? '');
-check('abonnement grossiste (5 000 en base) : lien de paiement', ($r['body']['data']['amount'] ?? 0) === 5000 && $r['body']['data']['payment_url'] !== null, $r['raw']);
-check('double appui sur « Payer l\'abonnement » : même paiement', (call('POST', '/v1/merchant/subscription/pay', null, $merchant)['body']['data']['reference'] ?? '') === $subRef);
-$r = call('POST', '/v1/merchant/subscription/verify', ['reference' => $subRef], $merchant);
-check('abonnement payé et actif 30 jours', ($r['body']['data']['subscription']['status'] ?? '') === 'active', $r['raw']);
 check('crédit refusé sans consentement', call('POST', '/v1/merchant/credit-requests', null, $merchant)['body']['error']['code'] === 'DATA_SHARING_REQUIRED');
 call('PUT', '/v1/merchant/data-sharing', ['enabled' => true], $merchant);
 check('consentement enregistré (date, périmètre) puis demande de crédit', Database::value('SELECT scope FROM data_sharing_consents WHERE merchant_user_id = ? AND revoked_at IS NULL', [$merchantId]) !== null
     && call('POST', '/v1/merchant/credit-requests', ['amount' => 200000], $merchant)['status'] === 200);
 $consents = call('GET', '/v1/me/consents', null, $merchant)['body']['data']['consents'] ?? [];
 check('mes consentements visibles et révocables', ($consents[0]['active'] ?? false) === true);
+
+// ---------------------------------------------------------------------------
+section('7b. Stock : réservé à la commande, produit masqué quand il est épuisé, rendu si annulé');
+$r = call('POST', '/v1/orders/quote', ['lines' => [['product_id' => "prd_$scarfId", 'quantity' => 3]], 'reception' => ['mode' => 'delivery', 'detail' => '']]);
+check('3 demandés pour 2 en stock : indisponible', ($r['body']['data']['unavailable_product_ids'] ?? []) === ["prd_$scarfId"], $r['raw']);
+// Numéro « coupure réseau » de la passerelle factice : le paiement reste en attente, la commande peut être annulée
+$r = call('POST', '/v1/orders', ['lines' => [['product_id' => "prd_$scarfId", 'quantity' => 2]], 'reception' => ['mode' => 'delivery', 'detail' => 'Fidjrossè'], 'payment' => ['operator' => 'mtn', 'phone' => FakeGateway::NETWORK_FAILURE_PHONE]], $client, ['Idempotency-Key' => "sim-$stamp-stock"]);
+$scarfOrder = (string) ($r['body']['data']['id'] ?? 'cmd_0');
+check('commande des 2 derniers : stock réservé (0)', $r['status'] === 201 && (int) Database::value('SELECT stock_quantity FROM products WHERE id = ?', [$scarfId]) === 0, $r['raw']);
+check('épuisé : invisible des clients, visible « épuisé » pour le commerçant, commerçant prévenu', call('GET', "/v1/products/prd_$scarfId")['status'] === 404
+    && !in_array("prd_$scarfId", array_column(call('GET', "/v1/stalls/stl_$stallId")['body']['data']['products'] ?? [], 'id'), true)
+    && in_array(true, array_column(array_filter(call('GET', '/v1/merchant/stall', null, $merchant)['body']['data']['products'] ?? [], static fn ($p) => $p['id'] === "prd_$scarfId"), 'sold_out'), true)
+    && Database::value("SELECT COUNT(*) FROM notifications WHERE user_id = ? AND title = 'Stock épuisé : Foulard en soie'", [$merchantId]) === 1);
+$parallel = parallel(4, '/v1/orders', ['lines' => [['product_id' => "prd_$scarfId", 'quantity' => 1]], 'reception' => ['mode' => 'delivery', 'detail' => 'x'], 'payment' => ['operator' => 'mtn', 'phone' => '']], $client);
+check('plus de stock : aucune autre commande possible', !in_array(201, array_column($parallel, 'status'), true));
+call('POST', "/v1/orders/$scarfOrder/cancel", null, $client);
+check('commande annulée avant paiement : stock rendu (2), produit de nouveau visible', (int) Database::value('SELECT stock_quantity FROM products WHERE id = ?', [$scarfId]) === 2 && call('GET', "/v1/products/prd_$scarfId")['status'] === 200);
+call('POST', "/v1/orders/$scarfOrder/cancel", null, $client);
+check('annulation répétée : stock rendu une seule fois', (int) Database::value('SELECT stock_quantity FROM products WHERE id = ?', [$scarfId]) === 2);
+$r = call('PATCH', "/v1/merchant/products/prd_$scarfId", ['stock_quantity' => 10], $merchant);
+check('réassort par le commerçant', ($r['body']['data']['stock_quantity'] ?? 0) === 10, $r['raw']);
+
+section('7c. Paiement sur place : frais payés en ligne, marchandise en espèces');
+$q = call('POST', '/v1/orders/quote', ['lines' => [['product_id' => "prd_$waxId", 'quantity' => 1]], 'reception' => ['mode' => 'delivery', 'detail' => ''], 'payment_mode' => 'on_site'])['body']['data'] ?? [];
+check('devis sur place : en ligne = livraison + frais de service (2 %), espèces = marchandise', ($q['pay_on_site_available'] ?? false) === true && $q['service_fee'] === 380 && $q['total'] === 1500 + 380 && $q['cash_total'] === 19000, json_encode($q));
+$r = call('POST', '/v1/orders', ['lines' => [['product_id' => "prd_$rice", 'quantity' => 1]], 'reception' => ['mode' => 'delivery', 'detail' => 'x'], 'payment_mode' => 'on_site', 'payment' => ['operator' => 'mtn', 'phone' => '']], $client);
+check('commerçant qui n\'accepte pas le paiement sur place : refusé', ($r['body']['error']['code'] ?? '') === 'PAY_ON_SITE_UNAVAILABLE', $r['raw']);
+$r = call('POST', '/v1/orders', ['lines' => [['product_id' => "prd_$waxId", 'quantity' => 1]], 'reception' => ['mode' => 'delivery', 'detail' => 'Cadjèhoun'], 'payment_mode' => 'on_site', 'payment' => ['operator' => 'mtn', 'phone' => '']], $client, ['Idempotency-Key' => "sim-$stamp-cash"]);
+$cashId = (string) ($r['body']['data']['id'] ?? 'cmd_0');
+check('commande sur place : paiement en ligne des frais seulement (1 880)', ($r['body']['data']['payment_mode'] ?? '') === 'on_site' && (int) Database::value('SELECT amount FROM payments WHERE order_id = ?', [id($cashId)]) === 1880, $r['raw']);
+$held = (int) call('GET', '/v1/merchant/money', null, $merchant)['body']['data']['pending_amount'];
+call('POST', "/v1/orders/$cashId/verify-payment", null, $client);
+check('frais payés : part du commerçant « espèces », rien de bloqué chez Axi', Database::value('SELECT escrow_state FROM order_stalls WHERE order_id = ?', [id($cashId)]) === 'cash'
+    && (int) call('GET', '/v1/merchant/money', null, $merchant)['body']['data']['pending_amount'] === $held
+    && Database::value("SELECT COUNT(*) FROM notifications WHERE user_id = ? AND title = 'Nouvelle commande, paiement sur place'", [$merchantId]) === 1);
+$r = call('POST', "/v1/orders/$cashId/confirm-receipt", null, $client);
+check('réception confirmée : commande livrée, aucun versement dû', ($r['body']['data']['status'] ?? '') === 'delivered' && Database::value('SELECT escrow_state FROM order_stalls WHERE order_id = ?', [id($cashId)]) === 'cash', $r['raw']);
+
+section('7d. Messagerie client ↔ commerçant (24 h, gardée si le client suit l\'étal)');
+$secondStall = id((string) (call('GET', '/v1/me', null, $second)['body']['data']['merchant']['stall_id'] ?? 'stl_0'));
+$conv = (string) (call('POST', "/v1/stalls/stl_$secondStall/conversation", null, $client)['body']['data']['conversation']['id'] ?? '');
+$r = call('POST', "/v1/conversations/$conv/messages", ['body' => 'Bonjour, le riz est-il disponible ?'], $client);
+check('le client écrit au commerçant : message enregistré, effacé dans 24 h', $r['status'] === 201 && Database::value('SELECT expires_at FROM messages WHERE id = ?', [id($r['body']['data']['id'])]) !== null, $r['raw']);
+check('pastille : 1 message non lu chez le commerçant', (call('GET', '/v1/me/badges', null, $second)['body']['data']['unread_messages'] ?? 0) === 1);
+$list = call('GET', '/v1/conversations', null, $second)['body']['data']['conversations'] ?? [];
+check('liste des conversations du commerçant', count($list) === 1 && $list[0]['unread_count'] === 1 && $list[0]['my_role'] === 'merchant', json_encode($list));
+call('GET', "/v1/conversations/$conv/messages", null, $second);
+check('conversation ouverte : lue', (call('GET', '/v1/me/badges', null, $second)['body']['data']['unread_messages'] ?? 1) === 0);
+call('POST', "/v1/conversations/$conv/messages", ['body' => 'Oui, 25 kg à 17 500.'], $second);
+$r = call('POST', "/v1/conversations/$conv/messages", ['photo' => new CURLFile($photo, 'image/webp')], $second, [], true);
+check('photo envoyée dans la conversation', ($r['body']['data']['image']['medium_url'] ?? null) !== null, $r['raw']);
+$r = call('POST', "/v1/conversations/$conv/messages", ['audio' => new CURLFile(__DIR__ . '/fixtures/voix.m4a', 'audio/mp4', 'voix.m4a')], $client, [], true);
+check('message vocal envoyé (lien d\'écoute signé)', str_contains((string) ($r['body']['data']['audio_url'] ?? ''), 'sig='), $r['raw']);
+$msgs = call('GET', "/v1/conversations/$conv/messages", null, $client)['body']['data'] ?? [];
+check('le client voit les 4 messages et la règle des 24 h', count($msgs['messages'] ?? []) === 4 && $msgs['conversation']['kept'] === false, json_encode($msgs['conversation'] ?? []));
+$last = end($msgs['messages']);
+check('« après » un message : seulement les nouveaux (rafraîchissement léger)', count(call('GET', "/v1/conversations/$conv/messages?after=" . $last['id'], null, $client)['body']['data']['messages'] ?? [1]) === 0);
+check('un tiers ne peut pas lire la conversation (404)', call('GET', "/v1/conversations/$conv/messages", null, $merchant)['status'] === 404);
+call('POST', "/v1/stalls/stl_$secondStall/follow", null, $client);
+check('le client suit l\'étal : messages gardés', (int) Database::value('SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.id = ? AND m.expires_at IS NOT NULL', [id($conv)]) === 0);
+call('DELETE', "/v1/stalls/stl_$secondStall/follow", null, $client);
+check('il ne suit plus : effacement programmé dans 24 h', (int) Database::value('SELECT COUNT(*) FROM messages m WHERE m.conversation_id = ? AND m.expires_at IS NULL', [id($conv)]) === 0);
+Database::run('UPDATE messages SET expires_at = ? WHERE conversation_id = ?', [\Axi\Core\Clock::now(-60), id($conv)]);
+check('après 24 h : messages invisibles puis effacés par la tâche planifiée', count(call('GET', "/v1/conversations/$conv/messages", null, $client)['body']['data']['messages'] ?? [1]) === 0
+    && \Axi\Services\Messaging::purgeExpired() >= 4 && (int) Database::value('SELECT COUNT(*) FROM messages WHERE conversation_id = ?', [id($conv)]) === 0);
+$riceClient = (string) (call('GET', '/v1/merchant/clients', null, $second)['body']['data']['clients'][0]['id'] ?? 'cli_0');
+$r = call('POST', "/v1/merchant/clients/$riceClient/conversation", null, $second);
+check('le commerçant peut écrire à un de ses clients qui a un compte', ($r['body']['data']['conversation']['id'] ?? '') === $conv, $r['raw']);
+
+section('7e. Photo de profil et qui peut la voir');
+$r = call('POST', '/v1/me/avatar', ['photo' => new CURLFile($photo, 'image/webp')], $client, [], true);
+check('photo de profil ajoutée', ($r['body']['data']['avatar']['medium_url'] ?? null) !== null, $r['raw']);
+call('POST', "/v1/conversations/$conv/messages", ['body' => 'Merci !'], $client);
+call('PATCH', '/v1/me', ['avatar_visibility' => 'nobody'], $client);
+$other = call('GET', '/v1/conversations', null, $second)['body']['data']['conversations'][0]['other'] ?? [];
+check('« personne » : le commerçant ne voit pas la photo', array_key_exists('avatar', $other) && $other['avatar'] === null, json_encode($other));
+call('PATCH', '/v1/me', ['avatar_visibility' => 'contacts'], $client);
+check('« mes contacts » : visible par le commerçant avec qui il discute', (call('GET', '/v1/conversations', null, $second)['body']['data']['conversations'][0]['other']['avatar'] ?? null) !== null);
+check('photo retirée', call('DELETE', '/v1/me/avatar', null, $client)['body']['data']['avatar'] === null);
 
 // ---------------------------------------------------------------------------
 section('8. Partenaires : IMF, ANaGeM, annonceur (données agrégées, consentement)');
