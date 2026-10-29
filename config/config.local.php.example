@@ -1,0 +1,38 @@
+<?php
+// Copier ce fichier en config.local.php (même dossier) puis compléter.
+// config.local.php contient les secrets : ne jamais le versionner, ne jamais l'envoyer par email.
+// Hébergement mutualisé : le déposer par FTP ou le gestionnaire de fichiers, droits 640 (ou 600).
+defined('BASE_PATH') || exit;
+
+return [
+    // local : codes email aussi écrits dans storage/logs/codes.log, paiement factice, erreurs détaillées
+    // production : sur le serveur en ligne
+    'env' => 'production',
+    // Clé des codes email (64 caractères hexadécimaux). Générer sur https://… ou :
+    // php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
+    'app_key' => '',
+    // URL publique de l'API, ex. https://api.axi.bj (vide = déduite de la requête)
+    'public_url' => '',
+    'db' => [
+        'host' => 'localhost',
+        'port' => 3306,
+        'name' => '',
+        'user' => '',
+        'pass' => '',
+    ],
+    'mail' => [
+        'host' => 'smtp.gmail.com',
+        'port' => 587,
+        'encryption' => 'tls',
+        'username' => '',
+        // Gmail : « mot de passe d'application » (16 lettres), pas le mot de passe du compte
+        'password' => '',
+        'from_name' => 'Axi',
+    ],
+    // Origines web autorisées (Expo web / Axi Pro), ex. ['https://pro.axi.bj']
+    'cors_origins' => [],
+    // '' en production tant qu'aucun prestataire Mobile Money n'est branché ; 'fake' en local seulement
+    'payment_provider' => '',
+    // Clé de la tâche planifiée appelée par URL (40 caractères ou plus, au hasard)
+    'cron_key' => '',
+];

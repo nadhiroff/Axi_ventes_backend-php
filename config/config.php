@@ -1,38 +1,42 @@
 <?php
 declare(strict_types=1);
 
-use Axi\Core\Env;
-
-// Les secrets et réglages propres à chaque machine viennent du fichier .env (jamais versionné).
+// Valeurs par défaut, sans aucun secret. Les secrets et réglages propres à chaque machine
+// (base, SMTP, clés) sont dans config/config.local.php : jamais versionné, jamais servi par le serveur web.
 // Les réglages métier ci-dessous sont des hypothèses de la note de cadrage, à confirmer sur le terrain.
-return [
-    'env' => Env::get('APP_ENV', 'production'),
-    'app_key' => Env::get('APP_KEY', ''),
+defined('BASE_PATH') || exit;
+
+$config = [
+    'env' => 'production',
+    'app_key' => '',
     // URL publique de l'API, ex. https://api.axi.bj (vide = déduite de la requête)
-    'public_url' => Env::get('APP_URL', ''),
+    'public_url' => '',
     'timezone' => 'Africa/Porto-Novo',
     'city' => ['id' => 'cotonou', 'name' => 'Cotonou'],
     'db' => [
-        'host' => Env::get('DB_HOST', '127.0.0.1'),
-        'port' => (int) Env::get('DB_PORT', '3306'),
-        'name' => Env::get('DB_NAME', 'axi'),
-        'user' => Env::get('DB_USER', ''),
-        'pass' => Env::get('DB_PASS', ''),
+        'host' => '127.0.0.1',
+        'port' => 3306,
+        'name' => 'axi',
+        'user' => '',
+        'pass' => '',
         'charset' => 'utf8mb4',
     ],
     'mail' => [
-        'host' => Env::get('MAIL_HOST', ''),
-        'port' => (int) Env::get('MAIL_PORT', '587'),
-        'encryption' => Env::get('MAIL_ENCRYPTION', 'tls'),
-        'username' => Env::get('MAIL_USERNAME', ''),
-        'password' => Env::get('MAIL_PASSWORD', ''),
-        'from_name' => Env::get('MAIL_FROM_NAME', 'Axi'),
+        'host' => '',
+        'port' => 587,
+        'encryption' => 'tls',
+        'username' => '',
+        'password' => '',
+        'from_name' => 'Axi',
     ],
     // Prestataire Mobile Money : « fake » (APP_ENV=local seulement) ; le vrai prestataire viendra plus tard
-    'payment_provider' => Env::get('PAYMENT_PROVIDER', ''),
-    'cors_origins' => array_values(array_filter(array_map('trim', explode(',', (string) Env::get('CORS_ORIGINS', ''))))),
+    'payment_provider' => '',
+    // Origines web autorisées (Expo web, Axi Pro), ex. ['https://pro.axi.bj']
+    'cors_origins' => [],
+    // Clé de l'URL de la tâche planifiée (/v1/internal/cron?key=…), pour les hébergements sans SSH
+    'cron_key' => '',
     'auth' => [
-        'token_ttl_days' => (int) Env::get('TOKEN_TTL_DAYS', '90'),
+        'token_ttl_days' => 90,
         'password_min' => 8,
         'code_ttl_seconds' => 900,
         'code_max_attempts' => 5,
@@ -52,6 +56,12 @@ return [
         ],
         'subscription' => ['retail' => 2000, 'wholesale' => 5000],
     ],
+    'escrow' => [
+        // Remise au coursier sans confirmation du client : argent libéré après N jours
+        'auto_release_days' => 7,
+        // Commande jamais payée : annulée après N heures
+        'unpaid_expiry_hours' => 24,
+    ],
     'customers' => [
         'loyal_min_orders' => 3,
         'follow_up_days' => 30,
@@ -67,3 +77,9 @@ return [
     // Mention « Service en ligne des marchés » sur l'accueil, si l'accord ANaGeM est signé
     'anagem_partnership' => false,
 ];
+
+$local = __DIR__ . '/config.local.php';
+if (!is_file($local)) {
+    throw new RuntimeException('config/config.local.php manquant : copiez config/config.local.php.example et complétez-le');
+}
+return array_replace_recursive($config, require $local);
