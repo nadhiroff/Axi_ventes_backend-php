@@ -32,26 +32,54 @@ final class Request
         // Apache peut transmettre Authorization sous un autre nom après réécriture
         $headers['authorization'] ??= $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? null;
 
-        [$path, $base] = self::resolvePath();
-        Url::setBase((string) (Config::get('public_url') ?: self::origin() . $base));
+        [$path, $routeBase, $assetBase] = self::resolvePath();
+        $public = (string) Config::get('public_url');
+        if ($public !== '') {
+            Url::setBases($public, $public);
+        } else {
+            Url::setBases(self::origin() . $routeBase, self::origin() . $assetBase);
+        }
 
         return new self($method, $path, $_GET, self::parseBody(), $headers);
     }
 
     /**
-     * Chemin relatif à l'application, que l'API soit à la racine ou dans un sous-dossier.
-     * Renvoie [chemin, préfixe retiré].
+     * Chemin relatif à l'application, que l'API soit à la racine, dans un sous-dossier, avec ou sans
+     * réécriture d'adresse. Renvoie [chemin, base des liens de pages, base des fichiers (photos)].
+     * - Adresse avec le script : /…/public/index.php/pro/connexion → /pro/connexion
+     * - Réécriture active (.htaccess, ou serveur intégré php -S) : liens courts /…/pro/connexion
+     * - Sans réécriture (Apache avec AllowOverride None) : liens par /…/public/index.php/…
      */
     private static function resolvePath(): array
     {
         $path = rawurldecode(parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/');
-        $script = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
-        foreach ([$script, (string) preg_replace('#/public$#', '', $script)] as $prefix) {
+        $scriptName = str_replace('\\', '/', (string) ($_SERVER['SCRIPT_NAME'] ?? ''));
+        $scriptDir = rtrim(dirname($scriptName), '/');
+
+        if ($scriptName !== '' && ($path === $scriptName || str_starts_with($path, $scriptName . '/'))) {
+            return ['/' . trim(substr($path, strlen($scriptName)), '/'), $scriptName, $scriptDir];
+        }
+        foreach ([$scriptDir, (string) preg_replace('#/public$#', '', $scriptDir)] as $prefix) {
             if ($prefix !== '' && str_starts_with($path, $prefix . '/')) {
-                return ['/' . trim(substr($path, strlen($prefix)), '/'), $prefix];
+                $route = self::rewriting() ? $prefix : $scriptName;
+                return ['/' . trim(substr($path, strlen($prefix)), '/'), $route, $prefix];
             }
         }
-        return ['/' . trim($path, '/'), ''];
+        return ['/' . trim($path, '/'), self::rewriting() ? '' : $scriptName, ''];
+    }
+
+    /** Réécriture d'adresse disponible : serveur intégré de PHP, ou .htaccess lu par Apache (variable AXI_REWRITE) */
+    private static function rewriting(): bool
+    {
+        if (PHP_SAPI === 'cli-server') {
+            return true;
+        }
+        foreach (array_keys($_SERVER) as $key) {
+            if (str_ends_with((string) $key, 'AXI_REWRITE')) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static function origin(): string
