@@ -5,58 +5,84 @@
 -- Ne pas modifier à la main.
 --
 -- INSTALLATION (hébergement sans SSH) :
---   1. Créer une base vide dans le panneau de l'hébergeur (cPanel > Bases de données MySQL),
---      en interclassement utf8mb4_unicode_ci.
+--   1. Créer une base VIDE dans le panneau de l'hébergeur, interclassement utf8mb4_unicode_ci.
 --   2. phpMyAdmin > choisir CETTE base > onglet « Importer » > ce fichier > Exécuter.
---   3. Créer le premier administrateur : importer database/premier_admin.sql (voir README).
+--   3. Créer le premier compte partenaire (agent Axi) : php database/premier_partenaire.php (voir README).
 --
--- MISE À JOUR d'une base déjà installée : ne PAS réimporter ce fichier. Importer seulement
--- les nouveaux fichiers de database/migrations/ absents de la table schema_migrations.
+-- MISE À JOUR d'une base déjà installée : ne PAS réimporter ce fichier ; importer seulement les nouveaux
+-- fichiers de database/migrations/ absents de la table schema_migrations.
 -- =============================================================================
 
 SET NAMES utf8mb4;
 SET time_zone = '+00:00';
-
 CREATE TABLE schema_migrations (
   file VARCHAR(190) PRIMARY KEY,
   applied_at DATETIME NOT NULL
 ) ENGINE=InnoDB;
 
 -- -----------------------------------------------------------------------------
--- 001_auth.sql
+-- 001_schema.sql
 -- -----------------------------------------------------------------------------
--- Axi : schéma de la base (étape 1 : authentification)
--- Exécution : mysql -u admin -p < database/migrations/001_auth.sql
+-- =============================================================================
+-- Axi : schéma complet de la base (3 rôles : client, commerçant, partenaire)
+-- Montants en FCFA (entiers). Dates en UTC. Aucune authentification par téléphone ni SMS.
+-- =============================================================================
 
 
-CREATE TABLE IF NOT EXISTS users (
+-- -----------------------------------------------------------------------------
+-- Réglages métier modifiables par un agent Axi (hypothèses de la note de cadrage)
+-- -----------------------------------------------------------------------------
+CREATE TABLE settings (
+  k VARCHAR(60) PRIMARY KEY,
+  v VARCHAR(255) NOT NULL,
+  label VARCHAR(160) NOT NULL,
+  type ENUM('int','percent','bool','text') NOT NULL DEFAULT 'int',
+  updated_by INT UNSIGNED NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+-- -----------------------------------------------------------------------------
+-- Comptes : client, commerçant, partenaire (sous-type = type de son organisation)
+-- -----------------------------------------------------------------------------
+CREATE TABLE organizations (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  phone VARCHAR(20) NOT NULL,
-  name VARCHAR(100) NOT NULL,
-  role ENUM('client','merchant','pro','agent','admin') NOT NULL DEFAULT 'client',
-  lang ENUM('fr','fon','yo','en') NOT NULL DEFAULT 'fr',
+  name VARCHAR(150) NOT NULL,
+  type ENUM('axi','anagem','advertiser','mfi') NOT NULL,   -- agent Axi, ANaGeM, annonceur, IMF
   status ENUM('active','suspended') NOT NULL DEFAULT 'active',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uq_users_phone (phone)
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
-CREATE TABLE IF NOT EXISTS otp_codes (
+CREATE TABLE users (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  phone VARCHAR(20) NOT NULL,
-  code_hash CHAR(64) NOT NULL,
-  attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
-  expires_at DATETIME NOT NULL,
-  used_at DATETIME NULL,
-  created_at DATETIME NOT NULL,
-  KEY idx_otp_phone (phone, id)
+  first_name VARCHAR(60) NOT NULL,
+  last_name VARCHAR(60) NOT NULL,
+  name VARCHAR(130) NOT NULL,
+  email VARCHAR(190) NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  email_verified_at DATETIME NULL,
+  phone VARCHAR(20) NULL,                 -- simple contact (Mobile Money, WhatsApp), jamais pour se connecter
+  role ENUM('client','merchant','partner') NOT NULL DEFAULT 'client',
+  organization_id INT UNSIGNED NULL,      -- obligatoire pour un partenaire
+  lang ENUM('fr','en','fon','yo') NOT NULL DEFAULT 'fr',
+  status ENUM('active','suspended','deleted') NOT NULL DEFAULT 'active',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  deleted_at DATETIME NULL,
+  UNIQUE KEY uq_users_email (email),
+  UNIQUE KEY uq_users_phone (phone),
+  KEY idx_users_role (role, status),
+  CONSTRAINT fk_users_organization FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
-CREATE TABLE IF NOT EXISTS auth_tokens (
+ALTER TABLE settings ADD CONSTRAINT fk_settings_user FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL;
+
+CREATE TABLE auth_tokens (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   user_id INT UNSIGNED NOT NULL,
-  token_hash CHAR(64) NOT NULL,
+  token_hash CHAR(64) NOT NULL,           -- sha256 du jeton ; le jeton n'est jamais stocké
   device VARCHAR(120) NULL,
+  ip VARCHAR(45) NULL,
   expires_at DATETIME NOT NULL,
   last_used_at DATETIME NOT NULL,
   revoked_at DATETIME NULL,
@@ -66,40 +92,77 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
   CONSTRAINT fk_tokens_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
-INSERT INTO schema_migrations (file, applied_at) VALUES ('001_auth.sql', UTC_TIMESTAMP());
-
--- -----------------------------------------------------------------------------
--- 002_marche_et_axi_pro.sql
--- -----------------------------------------------------------------------------
--- Axi : marché (sites, allées, étals, produits, commandes), gestion des commerçants et Axi Pro.
--- Reprend docs/sql/002_auth_et_axi_pro.sql du frontend (sauf otp_codes) et ajoute les tables du marché.
--- Montants en FCFA (entiers). Dates en UTC.
-
-
--- ---------------------------------------------------------------------------
--- Organisations partenaires (ANaGeM, annonceurs, IMF, études)
--- ---------------------------------------------------------------------------
-CREATE TABLE organizations (
+-- Codes à 6 chiffres envoyés par EMAIL (HMAC) ; seul le dernier code d'un couple (email, purpose) compte
+CREATE TABLE email_codes (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  name VARCHAR(150) NOT NULL,
-  type ENUM('anagem','advertiser','mfi','research') NOT NULL,
-  status ENUM('active','suspended') NOT NULL DEFAULT 'active',
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  email VARCHAR(190) NOT NULL,
+  purpose ENUM('verify_email','reset_password') NOT NULL,
+  code_hash CHAR(64) NOT NULL,
+  attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  expires_at DATETIME NOT NULL,
+  used_at DATETIME NULL,
+  created_at DATETIME NOT NULL,
+  KEY idx_email_codes (email, purpose, created_at)
 ) ENGINE=InnoDB;
 
-ALTER TABLE users
-  ADD COLUMN organization_id INT UNSIGNED NULL AFTER role,
-  ADD CONSTRAINT fk_users_organization FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL;
+-- Historique des connexions (réussies et échouées) : sécurité et limite de 5 échecs par 15 minutes
+CREATE TABLE login_events (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id INT UNSIGNED NULL,
+  email VARCHAR(190) NOT NULL,
+  ip VARCHAR(45) NOT NULL,
+  device VARCHAR(120) NULL,
+  channel ENUM('app','web') NOT NULL DEFAULT 'app',
+  success TINYINT(1) NOT NULL,
+  reason VARCHAR(40) NULL,
+  created_at DATETIME NOT NULL,
+  KEY idx_login_email (email, created_at),
+  KEY idx_login_ip (ip, created_at),
+  KEY idx_login_user (user_id, id),
+  CONSTRAINT fk_login_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
 
--- ---------------------------------------------------------------------------
--- Sites et allées : identifiants lisibles, repris tels quels dans l'API
--- ---------------------------------------------------------------------------
+-- Paramètres de l'utilisateur (thème, notifications, infos mémorisées, plafond de données)
+CREATE TABLE user_settings (
+  user_id INT UNSIGNED PRIMARY KEY,
+  theme ENUM('system','light','dark') NOT NULL DEFAULT 'system',
+  currency CHAR(3) NOT NULL DEFAULT 'XOF',
+  date_format ENUM('dd/mm/yyyy','yyyy-mm-dd') NOT NULL DEFAULT 'dd/mm/yyyy',
+  notifications JSON NULL,               -- {"order":{"email":true,"app":true}, ...}
+  default_address VARCHAR(255) NULL,
+  preferred_point_id INT UNSIGNED NULL,
+  preferred_operator ENUM('mtn','moov','celtiis') NULL,
+  preferred_payment_phone VARCHAR(20) NULL,
+  data_cap_mb INT UNSIGNED NOT NULL DEFAULT 1500,
+  data_month CHAR(7) NULL,
+  data_used_bytes BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_user_settings_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Notifications dans l'application (et copie par email selon les préférences)
+CREATE TABLE notifications (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id INT UNSIGNED NOT NULL,
+  type ENUM('order','payment','reminder','promotion','arrival','account') NOT NULL,
+  title VARCHAR(160) NOT NULL,
+  body VARCHAR(600) NOT NULL,
+  data JSON NULL,
+  read_at DATETIME NULL,
+  created_at DATETIME NOT NULL,
+  KEY idx_notifications_user (user_id, id),
+  CONSTRAINT fk_notifications_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- -----------------------------------------------------------------------------
+-- Marché : sites, allées (sous-marchés gérés en base), référentiel produits
+-- -----------------------------------------------------------------------------
 CREATE TABLE sites (
   id VARCHAR(30) PRIMARY KEY,
   name VARCHAR(100) NOT NULL,
   city VARCHAR(100) NOT NULL DEFAULT 'Cotonou',
   map_url VARCHAR(255) NULL,
+  active TINYINT(1) NOT NULL DEFAULT 1,
   sort_order SMALLINT UNSIGNED NOT NULL DEFAULT 0
 ) ENGINE=InnoDB;
 
@@ -107,10 +170,10 @@ CREATE TABLE aisles (
   id VARCHAR(30) PRIMARY KEY,
   name VARCHAR(100) NOT NULL,
   icon ENUM('fabric','grain','beauty','hardware','parts','jewelry','electronics','other') NOT NULL DEFAULT 'other',
+  active TINYINT(1) NOT NULL DEFAULT 1,
   sort_order SMALLINT UNSIGNED NOT NULL DEFAULT 0
 ) ENGINE=InnoDB;
 
--- Référentiel produits : "Riz 25kg" et "Sac riz 25 kg" pointent vers la même référence (prix médians)
 CREATE TABLE product_refs (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   aisle_id VARCHAR(30) NOT NULL,
@@ -120,7 +183,6 @@ CREATE TABLE product_refs (
   FOREIGN KEY (aisle_id) REFERENCES aisles(id)
 ) ENGINE=InnoDB;
 
--- Prix médians par référence, site et jour, calculés chaque nuit par cron/run.php
 CREATE TABLE price_stats_daily (
   product_ref_id INT UNSIGNED NOT NULL,
   site_id VARCHAR(30) NOT NULL,
@@ -133,9 +195,9 @@ CREATE TABLE price_stats_daily (
   FOREIGN KEY (site_id) REFERENCES sites(id)
 ) ENGINE=InnoDB;
 
--- ---------------------------------------------------------------------------
--- Étals : un par commerçant, créé et vérifié sur place par un agent
--- ---------------------------------------------------------------------------
+-- -----------------------------------------------------------------------------
+-- Étals et produits
+-- -----------------------------------------------------------------------------
 CREATE TABLE stalls (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   user_id INT UNSIGNED NOT NULL,
@@ -143,13 +205,17 @@ CREATE TABLE stalls (
   tagline VARCHAR(160) NOT NULL DEFAULT '',
   site_id VARCHAR(30) NOT NULL,
   aisle_id VARCHAR(30) NOT NULL,
-  row_label VARCHAR(30) NULL,               -- « row » dans l'API (ROW est un mot réservé MySQL)
+  row_label VARCHAR(30) NULL,               -- « row » dans l'API
   stand VARCHAR(20) NULL,
   has_physical_place TINYINT(1) NOT NULL DEFAULT 1,
   merchant_type ENUM('retail','wholesale') NOT NULL DEFAULT 'retail',
   map_url VARCHAR(255) NULL,
-  verified_at DATETIME NULL,
+  photo_path VARCHAR(255) NULL,
+  photo_width SMALLINT UNSIGNED NULL,
+  photo_height SMALLINT UNSIGNED NULL,
+  verified_at DATETIME NULL,                -- badge « vérifié par un agent Axi »
   verified_by INT UNSIGNED NULL,
+  verification_photo_path VARCHAR(255) NULL,-- photo prise par l'agent à l'emplacement réel
   moved_at DATETIME NULL,
   relocation_sent_at DATETIME NULL,
   phone VARCHAR(20) NULL,
@@ -158,7 +224,7 @@ CREATE TABLE stalls (
   pay_on_delivery TINYINT(1) NOT NULL DEFAULT 0,
   delivery_note VARCHAR(160) NULL,
   is_open TINYINT(1) NOT NULL DEFAULT 1,
-  status ENUM('active','closed') NOT NULL DEFAULT 'active',
+  status ENUM('active','suspended','closed') NOT NULL DEFAULT 'active',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_stalls_user (user_id),
@@ -170,7 +236,7 @@ CREATE TABLE stalls (
   CONSTRAINT fk_stalls_agent FOREIGN KEY (verified_by) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
--- price_amount NULL = « Prix à débattre » ; price_max renseigné = fourchette
+-- price_amount NULL = « Prix à débattre » ; status draft = brouillon (produit dicté en vocal, à compléter)
 CREATE TABLE products (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   stall_id INT UNSIGNED NOT NULL,
@@ -180,10 +246,8 @@ CREATE TABLE products (
   price_max INT UNSIGNED NULL,
   in_stock TINYINT(1) NOT NULL DEFAULT 1,
   is_today TINYINT(1) NOT NULL DEFAULT 0,
-  image_path VARCHAR(255) NULL,             -- dossier contenant thumb.webp et medium.webp
-  image_width SMALLINT UNSIGNED NULL,
-  image_height SMALLINT UNSIGNED NULL,
-  status ENUM('active','deleted') NOT NULL DEFAULT 'active',
+  audio_path VARCHAR(255) NULL,
+  status ENUM('draft','active','deleted') NOT NULL DEFAULT 'active',
   created_by INT UNSIGNED NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -192,6 +256,19 @@ CREATE TABLE products (
   CONSTRAINT fk_products_stall FOREIGN KEY (stall_id) REFERENCES stalls(id),
   CONSTRAINT fk_products_ref FOREIGN KEY (product_ref_id) REFERENCES product_refs(id) ON DELETE SET NULL,
   CONSTRAINT fk_products_creator FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+-- Photos d'un produit (galerie) : dossier contenant thumb.webp et medium.webp, URL immuable
+CREATE TABLE product_images (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  product_id INT UNSIGNED NOT NULL,
+  path VARCHAR(255) NOT NULL,
+  width SMALLINT UNSIGNED NOT NULL,
+  height SMALLINT UNSIGNED NOT NULL,
+  position TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL,
+  KEY idx_images_product (product_id, position),
+  CONSTRAINT fk_images_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 CREATE TABLE stall_follows (
@@ -204,20 +281,53 @@ CREATE TABLE stall_follows (
   CONSTRAINT fk_follows_stall FOREIGN KEY (stall_id) REFERENCES stalls(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+CREATE TABLE favorites (
+  user_id INT UNSIGNED NOT NULL,
+  product_id INT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL,
+  PRIMARY KEY (user_id, product_id),
+  CONSTRAINT fk_favorites_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_favorites_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE product_views (
+  user_id INT UNSIGNED NOT NULL,
+  product_id INT UNSIGNED NOT NULL,
+  viewed_at DATETIME NOT NULL,
+  PRIMARY KEY (user_id, product_id),
+  KEY idx_views_user (user_id, viewed_at),
+  CONSTRAINT fk_views_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_views_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
 CREATE TABLE voice_messages (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   stall_id INT UNSIGNED NOT NULL,
   user_id INT UNSIGNED NOT NULL,
   audio_path VARCHAR(255) NOT NULL,
+  listened_at DATETIME NULL,
   created_at DATETIME NOT NULL,
   KEY idx_voice_stall (stall_id, id),
   CONSTRAINT fk_voice_stall FOREIGN KEY (stall_id) REFERENCES stalls(id) ON DELETE CASCADE,
   CONSTRAINT fk_voice_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
--- ---------------------------------------------------------------------------
--- Commandes : un seul paiement Mobile Money pour plusieurs étals, gardé par Axi
--- ---------------------------------------------------------------------------
+-- Demande de vérification de l'étal sur place par un agent Axi
+CREATE TABLE agent_visit_requests (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id INT UNSIGNED NOT NULL,
+  status ENUM('new','scheduled','done','cancelled') NOT NULL DEFAULT 'new',
+  assigned_agent_id INT UNSIGNED NULL,
+  scheduled_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_visit_status (status, created_at),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (assigned_agent_id) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+-- -----------------------------------------------------------------------------
+-- Commandes, paiement unique multi-étals et séquestre
+-- -----------------------------------------------------------------------------
 CREATE TABLE axi_points (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(100) NOT NULL,
@@ -231,43 +341,59 @@ CREATE TABLE axi_points (
 CREATE TABLE orders (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   client_id INT UNSIGNED NOT NULL,
-  status ENUM('awaiting_payment','paid','preparing','on_the_way','delivered','cancelled') NOT NULL DEFAULT 'awaiting_payment',
+  idempotency_key VARCHAR(64) NULL,         -- même clé = même commande (jamais deux débits)
+  request_hash CHAR(64) NULL,               -- empreinte du panier (double appui sans clé)
+  status ENUM('awaiting_payment','paid','preparing','on_the_way','delivered','disputed','refunded','cancelled') NOT NULL DEFAULT 'awaiting_payment',
   items_total INT UNSIGNED NOT NULL,
   grouping_fee INT UNSIGNED NOT NULL,
   reception_fee INT UNSIGNED NOT NULL,
-  total INT UNSIGNED NOT NULL,
+  commission_total INT UNSIGNED NOT NULL DEFAULT 0,
+  total INT UNSIGNED NOT NULL,              -- payé par le client (articles + regroupement + réception)
   reception_mode ENUM('delivery','bus','axi_point') NOT NULL,
   reception_detail VARCHAR(255) NOT NULL,
   axi_point_id INT UNSIGNED NULL,
-  payment_operator ENUM('mtn','moov','celtiis') NOT NULL,
-  payment_phone VARCHAR(20) NOT NULL,
+  payment_operator ENUM('mtn','moov','celtiis') NULL,
+  payment_phone VARCHAR(20) NULL,
   paid_at DATETIME NULL,
   delivered_at DATETIME NULL,
+  cancelled_at DATETIME NULL,
+  reminder_sent_at DATETIME NULL,
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_orders_idempotency (client_id, idempotency_key),
+  KEY idx_orders_request (client_id, request_hash, created_at),
   KEY idx_orders_client (client_id, id),
   KEY idx_orders_status (status, paid_at),
   CONSTRAINT fk_orders_client FOREIGN KEY (client_id) REFERENCES users(id),
   CONSTRAINT fk_orders_point FOREIGN KEY (axi_point_id) REFERENCES axi_points(id)
 ) ENGINE=InnoDB;
 
--- Part de la commande pour chaque étal (ce que voit le commerçant)
+-- Part de chaque étal = ligne interne du séquestre
+-- escrow_state : pending → held (payé, bloqué) → delivered → released (au commerçant) | refunded | disputed
 CREATE TABLE order_stalls (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   order_id INT UNSIGNED NOT NULL,
   stall_id INT UNSIGNED NOT NULL,
   items_total INT UNSIGNED NOT NULL,
+  commission INT UNSIGNED NOT NULL DEFAULT 0,
+  net_amount INT UNSIGNED NOT NULL,         -- dû au commerçant
+  refunded_amount INT UNSIGNED NOT NULL DEFAULT 0,
   status ENUM('awaiting_payment','to_prepare','ready','picked_up','delivered','cancelled') NOT NULL DEFAULT 'awaiting_payment',
+  escrow_state ENUM('pending','held','delivered','released','refunded','disputed') NOT NULL DEFAULT 'pending',
+  payout_id INT UNSIGNED NULL,
   ready_at DATETIME NULL,
+  picked_up_at DATETIME NULL,
+  delivered_at DATETIME NULL,
+  released_at DATETIME NULL,
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_order_stalls (order_id, stall_id),
   KEY idx_order_stalls_stall (stall_id, status),
+  KEY idx_order_stalls_escrow (escrow_state, payout_id),
   CONSTRAINT fk_order_stalls_order FOREIGN KEY (order_id) REFERENCES orders(id),
   CONSTRAINT fk_order_stalls_stall FOREIGN KEY (stall_id) REFERENCES stalls(id)
 ) ENGINE=InnoDB;
 
--- Lignes : nom et prix copiés au moment de l'achat
 CREATE TABLE order_items (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   order_stall_id INT UNSIGNED NOT NULL,
@@ -281,72 +407,179 @@ CREATE TABLE order_items (
   CONSTRAINT fk_items_product FOREIGN KEY (product_id) REFERENCES products(id)
 ) ENGINE=InnoDB;
 
--- held = argent gardé par Axi (séquestre) ; released = versé aux commerçants après réception
-CREATE TABLE payments (
-  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  order_id INT UNSIGNED NOT NULL,
-  provider VARCHAR(30) NOT NULL,
-  provider_ref VARCHAR(80) NULL,
-  operator ENUM('mtn','moov','celtiis') NOT NULL,
-  phone VARCHAR(20) NOT NULL,
-  amount INT UNSIGNED NOT NULL,
-  status ENUM('pending','held','released','failed','refunded') NOT NULL DEFAULT 'pending',
-  created_at DATETIME NOT NULL,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  KEY idx_payments_order (order_id),
-  CONSTRAINT fk_payments_order FOREIGN KEY (order_id) REFERENCES orders(id)
-) ENGINE=InnoDB;
-
--- ---------------------------------------------------------------------------
--- Commerçant : fichier clients (il lui appartient), messages groupés, abonnement
--- ---------------------------------------------------------------------------
-CREATE TABLE merchant_clients (
-  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  stall_id INT UNSIGNED NOT NULL,
-  user_id INT UNSIGNED NULL,
-  display_name VARCHAR(100) NOT NULL,
-  phone VARCHAR(20) NOT NULL,
-  kind ENUM('individual','reseller') NOT NULL DEFAULT 'individual',
-  orders_count INT UNSIGNED NOT NULL DEFAULT 0,
-  last_order_at DATETIME NULL,
-  last_follow_up_at DATETIME NULL,
-  created_at DATETIME NOT NULL,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uq_clients_phone (stall_id, phone),
-  CONSTRAINT fk_clients_stall FOREIGN KEY (stall_id) REFERENCES stalls(id) ON DELETE CASCADE,
-  CONSTRAINT fk_clients_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
-) ENGINE=InnoDB;
-
-CREATE TABLE broadcasts (
-  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  stall_id INT UNSIGNED NOT NULL,
-  kind ENUM('relocation','arrival','follow_up','segment') NOT NULL,
-  channel ENUM('axi','whatsapp') NOT NULL DEFAULT 'axi',
-  segment VARCHAR(20) NULL,
-  message VARCHAR(500) NOT NULL,
-  audio_path VARCHAR(255) NULL,
-  recipients INT UNSIGNED NOT NULL DEFAULT 0,
-  created_at DATETIME NOT NULL,
-  KEY idx_broadcasts_stall (stall_id, id),
-  CONSTRAINT fk_broadcasts_stall FOREIGN KEY (stall_id) REFERENCES stalls(id) ON DELETE CASCADE
-) ENGINE=InnoDB;
-
 CREATE TABLE subscriptions (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   stall_id INT UNSIGNED NOT NULL,
   plan ENUM('retail','wholesale') NOT NULL,
   amount INT UNSIGNED NOT NULL,
-  paid_by ENUM('merchant','anagem') NOT NULL DEFAULT 'merchant',
+  paid_by ENUM('merchant','anagem','axi') NOT NULL DEFAULT 'merchant',
+  status ENUM('pending','active','cancelled') NOT NULL DEFAULT 'pending',
   starts_on DATE NOT NULL,
   ends_on DATE NOT NULL,
+  created_by INT UNSIGNED NULL,
   created_at DATETIME NOT NULL,
-  KEY idx_subscriptions_stall (stall_id, ends_on),
+  KEY idx_subscriptions_stall (stall_id, status, ends_on),
   CONSTRAINT fk_subscriptions_stall FOREIGN KEY (stall_id) REFERENCES stalls(id)
 ) ENGINE=InnoDB;
 
--- ---------------------------------------------------------------------------
--- Campagnes (annonceurs) : le ciblage reste chez Axi, aucune liste ne sort
--- ---------------------------------------------------------------------------
+-- Paiement chez la passerelle (FedaPay ou KkiaPay) : un seul par commande ou par abonnement
+-- status : pending → paid (argent reçu ; bloqué chez Axi pour une commande) | failed | cancelled | expired
+--          paid → refunded | partially_refunded
+CREATE TABLE payments (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  purpose ENUM('order','subscription') NOT NULL,
+  order_id INT UNSIGNED NULL,
+  subscription_id INT UNSIGNED NULL,
+  user_id INT UNSIGNED NOT NULL,
+  provider VARCHAR(20) NOT NULL,            -- fedapay | kkiapay
+  reference VARCHAR(40) NOT NULL,           -- référence Axi fixe (merchant_reference / partnerId)
+  provider_ref VARCHAR(80) NULL,            -- identifiant de la transaction chez la passerelle
+  payment_url VARCHAR(600) NULL,
+  operator ENUM('mtn','moov','celtiis') NULL,
+  phone VARCHAR(20) NULL,
+  amount INT UNSIGNED NOT NULL,             -- calculé par le serveur, jamais fourni par le client
+  refunded_amount INT UNSIGNED NOT NULL DEFAULT 0,
+  status ENUM('pending','paid','failed','cancelled','expired','refunded','partially_refunded') NOT NULL DEFAULT 'pending',
+  gateway_status VARCHAR(40) NULL,
+  failure_reason VARCHAR(255) NULL,
+  paid_at DATETIME NULL,
+  checked_at DATETIME NULL,
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_payments_reference (reference),
+  UNIQUE KEY uq_payments_order (order_id),
+  UNIQUE KEY uq_payments_subscription (subscription_id),
+  UNIQUE KEY uq_payments_provider_ref (provider, provider_ref),
+  KEY idx_payments_user (user_id, id),
+  KEY idx_payments_status (status, created_at),
+  CONSTRAINT fk_payments_order FOREIGN KEY (order_id) REFERENCES orders(id),
+  CONSTRAINT fk_payments_subscription FOREIGN KEY (subscription_id) REFERENCES subscriptions(id),
+  CONSTRAINT fk_payments_user FOREIGN KEY (user_id) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+-- Journal de chaque changement d'état (paiement, séquestre, commande) : qui, quand, avant, après
+CREATE TABLE payment_events (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  payment_id INT UNSIGNED NULL,
+  order_id INT UNSIGNED NULL,
+  order_stall_id INT UNSIGNED NULL,
+  actor_type ENUM('system','client','merchant','partner','gateway') NOT NULL,
+  actor_id INT UNSIGNED NULL,
+  event VARCHAR(40) NOT NULL,
+  old_state VARCHAR(30) NULL,
+  new_state VARCHAR(30) NULL,
+  gateway_ref VARCHAR(80) NULL,
+  amount INT UNSIGNED NULL,
+  details JSON NULL,
+  created_at DATETIME NOT NULL,
+  KEY idx_events_payment (payment_id, id),
+  KEY idx_events_order (order_id, id)
+) ENGINE=InnoDB;
+
+-- Webhooks reçus : un même événement reçu deux fois n'est traité qu'une fois
+CREATE TABLE webhook_events (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  provider VARCHAR(20) NOT NULL,
+  event_key VARCHAR(190) NOT NULL,
+  payload MEDIUMTEXT NOT NULL,
+  result VARCHAR(80) NULL,
+  received_at DATETIME NOT NULL,
+  processed_at DATETIME NULL,
+  UNIQUE KEY uq_webhook_event (provider, event_key)
+) ENGINE=InnoDB;
+
+CREATE TABLE refunds (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  payment_id INT UNSIGNED NOT NULL,
+  order_stall_id INT UNSIGNED NULL,
+  amount INT UNSIGNED NOT NULL,
+  reason VARCHAR(255) NOT NULL,
+  status ENUM('pending','succeeded','failed','simulated') NOT NULL DEFAULT 'pending',
+  provider_ref VARCHAR(80) NULL,
+  created_by INT UNSIGNED NULL,
+  created_at DATETIME NOT NULL,
+  KEY idx_refunds_payment (payment_id),
+  CONSTRAINT fk_refunds_payment FOREIGN KEY (payment_id) REFERENCES payments(id)
+) ENGINE=InnoDB;
+
+CREATE TABLE disputes (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  order_id INT UNSIGNED NOT NULL,
+  order_stall_id INT UNSIGNED NULL,
+  client_id INT UNSIGNED NOT NULL,
+  reason VARCHAR(1000) NOT NULL,
+  status ENUM('open','resolved_refund','resolved_release','rejected') NOT NULL DEFAULT 'open',
+  resolution VARCHAR(1000) NULL,
+  resolved_by INT UNSIGNED NULL,
+  created_at DATETIME NOT NULL,
+  resolved_at DATETIME NULL,
+  KEY idx_disputes_status (status, id),
+  CONSTRAINT fk_disputes_order FOREIGN KEY (order_id) REFERENCES orders(id),
+  CONSTRAINT fk_disputes_client FOREIGN KEY (client_id) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+-- Versements aux commerçants (couche séparée ; simulés en sandbox)
+CREATE TABLE payouts (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  stall_id INT UNSIGNED NOT NULL,
+  amount INT UNSIGNED NOT NULL,
+  phone VARCHAR(20) NULL,
+  provider VARCHAR(20) NOT NULL,
+  provider_ref VARCHAR(80) NULL,
+  status ENUM('pending','simulated','paid','failed') NOT NULL DEFAULT 'pending',
+  created_by INT UNSIGNED NULL,
+  created_at DATETIME NOT NULL,
+  processed_at DATETIME NULL,
+  KEY idx_payouts_stall (stall_id, id),
+  CONSTRAINT fk_payouts_stall FOREIGN KEY (stall_id) REFERENCES stalls(id)
+) ENGINE=InnoDB;
+
+-- -----------------------------------------------------------------------------
+-- Commerçant : fichier clients (il lui appartient), messages groupés
+-- -----------------------------------------------------------------------------
+CREATE TABLE merchant_clients (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  stall_id INT UNSIGNED NOT NULL,
+  user_id INT UNSIGNED NULL,
+  display_name VARCHAR(100) NOT NULL,
+  phone VARCHAR(20) NULL,
+  email VARCHAR(190) NULL,
+  kind ENUM('individual','reseller') NOT NULL DEFAULT 'individual',
+  note VARCHAR(300) NULL,
+  orders_count INT UNSIGNED NOT NULL DEFAULT 0,
+  total_spent INT UNSIGNED NOT NULL DEFAULT 0,
+  last_order_at DATETIME NULL,
+  last_follow_up_at DATETIME NULL,
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_clients_user (stall_id, user_id),
+  UNIQUE KEY uq_clients_phone (stall_id, phone),
+  CONSTRAINT fk_clients_stall FOREIGN KEY (stall_id) REFERENCES stalls(id) ON DELETE CASCADE,
+  CONSTRAINT fk_clients_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+-- Messages groupés : envoyés par email et notification dans l'app ; lien WhatsApp proposé au commerçant
+CREATE TABLE broadcasts (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  stall_id INT UNSIGNED NOT NULL,
+  kind ENUM('relocation','arrival','follow_up','segment') NOT NULL,
+  segment VARCHAR(20) NULL,
+  message VARCHAR(500) NOT NULL,
+  audio_path VARCHAR(255) NULL,
+  recipients INT UNSIGNED NOT NULL DEFAULT 0,
+  emailed INT UNSIGNED NOT NULL DEFAULT 0,
+  notified INT UNSIGNED NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL,
+  KEY idx_broadcasts_stall (stall_id, id),
+  CONSTRAINT fk_broadcasts_stall FOREIGN KEY (stall_id) REFERENCES stalls(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- -----------------------------------------------------------------------------
+-- Partenaires : campagnes, consentements, crédits
+-- -----------------------------------------------------------------------------
+-- Formats : sponsored_home (bannière d'accueil), featured_stall (étal mis en avant),
+-- sponsored_aisle (catégorie sponsorisée), supplier_offer (offre aux commerçants).
+-- Règle : aucune publicité sur la page d'un étal.
 CREATE TABLE campaigns (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   organization_id INT UNSIGNED NOT NULL,
@@ -354,14 +587,15 @@ CREATE TABLE campaigns (
   audience_type ENUM('merchants','clients') NOT NULL,
   aisle_id VARCHAR(30) NULL,
   site_id VARCHAR(30) NULL,
-  format ENUM('supplier_offer','sponsored_home') NOT NULL,
-  title VARCHAR(150) NULL,
-  body VARCHAR(500) NULL,
-  target_type ENUM('stall','aisle') NULL,
-  target_id VARCHAR(30) NULL,
+  format ENUM('sponsored_home','featured_stall','sponsored_aisle','supplier_offer') NOT NULL,
+  title VARCHAR(150) NOT NULL,
+  body VARCHAR(500) NOT NULL DEFAULT '',
+  target_stall_id INT UNSIGNED NULL,
   url VARCHAR(255) NULL,
+  image_path VARCHAR(255) NULL,
   budget INT UNSIGNED NOT NULL,
   status ENUM('pending_review','active','ended','rejected') NOT NULL DEFAULT 'pending_review',
+  review_note VARCHAR(300) NULL,
   reviewed_by INT UNSIGNED NULL,
   starts_at DATETIME NULL,
   ends_at DATETIME NULL,
@@ -369,21 +603,21 @@ CREATE TABLE campaigns (
   clicks INT UNSIGNED NOT NULL DEFAULT 0,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  INDEX idx_campaign_status (status, starts_at),
+  INDEX idx_campaign_status (status, format),
   FOREIGN KEY (organization_id) REFERENCES organizations(id),
   FOREIGN KEY (created_by) REFERENCES users(id),
   FOREIGN KEY (reviewed_by) REFERENCES users(id) ON DELETE SET NULL,
   FOREIGN KEY (aisle_id) REFERENCES aisles(id),
-  FOREIGN KEY (site_id) REFERENCES sites(id)
+  FOREIGN KEY (site_id) REFERENCES sites(id),
+  FOREIGN KEY (target_stall_id) REFERENCES stalls(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
--- ---------------------------------------------------------------------------
--- Partage d'historique avec une IMF (accord explicite, révocable) et crédits
--- ---------------------------------------------------------------------------
+-- Consentement explicite du commerçant (date, périmètre, révocable) avant tout partage avec une IMF
 CREATE TABLE data_sharing_consents (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   merchant_user_id INT UNSIGNED NOT NULL,
   organization_id INT UNSIGNED NOT NULL,
+  scope VARCHAR(160) NOT NULL DEFAULT 'Historique des ventes Axi (montants mensuels, ancienneté)',
   granted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   revoked_at DATETIME NULL,
   INDEX idx_consent_active (organization_id, revoked_at),
@@ -395,8 +629,11 @@ CREATE TABLE credits (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   merchant_user_id INT UNSIGNED NOT NULL,
   organization_id INT UNSIGNED NOT NULL,
-  amount INT UNSIGNED NULL,
+  amount_requested INT UNSIGNED NULL,
+  amount INT UNSIGNED NULL,                 -- montant accordé
   status ENUM('new','in_review','granted','declined','repaid') NOT NULL DEFAULT 'new',
+  note VARCHAR(300) NULL,
+  decided_by INT UNSIGNED NULL,
   requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   decided_at DATETIME NULL,
   INDEX idx_credit_org_status (organization_id, status),
@@ -404,21 +641,7 @@ CREATE TABLE credits (
   FOREIGN KEY (organization_id) REFERENCES organizations(id)
 ) ENGINE=InnoDB;
 
--- ---------------------------------------------------------------------------
--- Agents : demandes de visite et journal de toutes leurs actions
--- ---------------------------------------------------------------------------
-CREATE TABLE agent_visit_requests (
-  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  user_id INT UNSIGNED NOT NULL,
-  status ENUM('new','scheduled','done','cancelled') NOT NULL DEFAULT 'new',
-  assigned_agent_id INT UNSIGNED NULL,
-  scheduled_at DATETIME NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_visit_status (status, created_at),
-  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-  FOREIGN KEY (assigned_agent_id) REFERENCES users(id) ON DELETE SET NULL
-) ENGINE=InnoDB;
-
+-- Journal des actions des partenaires (web) : qui, quoi, quand
 CREATE TABLE admin_actions (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   actor_id INT UNSIGNED NOT NULL,
@@ -433,100 +656,48 @@ CREATE TABLE admin_actions (
   CONSTRAINT fk_admin_actions_actor FOREIGN KEY (actor_id) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
--- ---------------------------------------------------------------------------
--- Données de référence
--- ---------------------------------------------------------------------------
+-- =============================================================================
+-- Données de référence (modifiables ensuite dans l'espace web partenaire)
+-- =============================================================================
+INSERT INTO settings (k, v, label, type) VALUES
+  ('grouping_fee_per_stall', '300', 'Frais de regroupement par étal (à partir de 2 étals), FCFA', 'int'),
+  ('fee_delivery', '1500', 'Frais de livraison Cotonou, FCFA', 'int'),
+  ('fee_bus', '2500', 'Frais d''expédition par car, FCFA', 'int'),
+  ('fee_axi_point', '500', 'Frais de retrait au point Axi, FCFA', 'int'),
+  ('commission_rate', '2', 'Commission Axi sur les ventes payées en ligne, % (0 = désactivée, sinon 2 à 4)', 'percent'),
+  ('subscription_retail', '2000', 'Abonnement mensuel détaillant (connexion incluse), FCFA', 'int'),
+  ('subscription_wholesale', '5000', 'Abonnement mensuel grossiste (connexion incluse), FCFA', 'int'),
+  ('auto_release_days', '7', 'Libération automatique au commerçant, jours après la remise au coursier', 'int'),
+  ('unpaid_expiry_hours', '24', 'Annulation d''une commande jamais payée, heures', 'int'),
+  ('payment_reminder_minutes', '60', 'Relance par email d''un paiement en attente, minutes', 'int'),
+  ('min_group_size', '5', 'Anonymat Axi Pro : nombre minimum d''étals par statistique', 'int'),
+  ('min_campaign_budget', '50000', 'Budget minimum d''une campagne, FCFA', 'int'),
+  ('loyal_min_orders', '3', 'Client fidèle : nombre minimum de commandes', 'int'),
+  ('follow_up_days', '30', 'Client à relancer : jours sans achat', 'int'),
+  ('anagem_partnership', '0', 'Afficher « Service en ligne des marchés · ANaGeM » sur l''accueil', 'bool'),
+  ('city_name', 'Cotonou', 'Ville affichée sur l''accueil', 'text');
+
+INSERT INTO organizations (id, name, type) VALUES (1, 'Axi', 'axi');
+
 INSERT INTO sites (id, name, sort_order) VALUES
   ('yoyo', 'Tokpa Yôyô', 1),
   ('daho', 'Tokpa Dahô', 2),
   ('ouando', 'Ouando', 3),
-  ('st-michel', 'Saint-Michel', 4);
+  ('st-michel', 'Saint-Michel', 4),
+  ('godomey', 'Godomey-Gare', 5),
+  ('arzeke', 'Arzèkè', 6);
 
 INSERT INTO aisles (id, name, icon, sort_order) VALUES
   ('tissus', 'Tissus et pagnes', 'fabric', 1),
-  ('vivriers', 'Vivriers en gros', 'grain', 2),
-  ('cosmetiques', 'Cosmétiques', 'beauty', 3),
-  ('quincaillerie', 'Quincaillerie', 'hardware', 4),
+  ('vivriers', 'Vivriers', 'grain', 2),
+  ('quincaillerie', 'Quincaillerie', 'hardware', 3),
+  ('cosmetiques', 'Cosmétiques', 'beauty', 4),
   ('pieces', 'Pièces détachées', 'parts', 5),
-  ('bijoux', 'Bijoux et sacs', 'jewelry', 6),
-  ('electronique', 'Électronique', 'electronics', 7);
+  ('electronique', 'Électronique', 'electronics', 6),
+  ('bijoux', 'Bijoux et maroquinerie', 'jewelry', 7);
 
 INSERT INTO axi_points (name, address, site_id, sort_order) VALUES
-  ('Point Axi Tokpa Yôyô', 'Entrée principale, à côté de la pharmacie', 'yoyo', 1),
+  ('Point Axi Tokpa Yôyô', 'Entrée principale', 'yoyo', 1),
   ('Point Axi Tokpa Dahô', 'Parking des grossistes', 'daho', 2);
 
-INSERT INTO schema_migrations (file, applied_at) VALUES ('002_marche_et_axi_pro.sql', UTC_TIMESTAMP());
-
--- -----------------------------------------------------------------------------
--- 003_auth_email.sql
--- -----------------------------------------------------------------------------
--- Axi : connexion par email et mot de passe (remplace la connexion par code SMS)
--- otp_codes n'est plus utilisée mais elle est conservée.
--- Attention : sur une base qui contient déjà des comptes, renseigner email et password_hash
--- de chaque compte AVANT d'ajouter l'index unique (sinon doublons sur la chaîne vide).
-
-
-ALTER TABLE users
-  MODIFY name VARCHAR(130) NOT NULL,
-  ADD COLUMN first_name VARCHAR(60) NOT NULL AFTER phone,
-  ADD COLUMN last_name VARCHAR(60) NOT NULL AFTER first_name,
-  ADD COLUMN email VARCHAR(190) NOT NULL AFTER last_name,
-  ADD COLUMN password_hash VARCHAR(255) NOT NULL AFTER email,
-  ADD COLUMN email_verified_at DATETIME NULL AFTER password_hash,
-  ADD UNIQUE KEY uq_users_email (email);
-
--- Codes à 6 chiffres envoyés par email ; seul le HMAC du code est stocké.
--- Seul le code le plus récent d'un couple (email, purpose) est valable.
-CREATE TABLE IF NOT EXISTS email_codes (
-  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  email VARCHAR(190) NOT NULL,
-  purpose ENUM('verify_email','reset_password') NOT NULL,
-  code_hash CHAR(64) NOT NULL,
-  attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
-  expires_at DATETIME NOT NULL,
-  used_at DATETIME NULL,
-  created_at DATETIME NOT NULL,
-  KEY idx_email_codes (email, purpose, created_at)
-) ENGINE=InnoDB;
-
--- Échecs de connexion : 5 par 15 minutes, par email et par adresse IP
-CREATE TABLE IF NOT EXISTS login_failures (
-  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  email VARCHAR(190) NOT NULL,
-  ip VARCHAR(45) NOT NULL,
-  created_at DATETIME NOT NULL,
-  KEY idx_failures_email (email, created_at),
-  KEY idx_failures_ip (ip, created_at)
-) ENGINE=InnoDB;
-
-INSERT INTO schema_migrations (file, applied_at) VALUES ('003_auth_email.sql', UTC_TIMESTAMP());
-
--- -----------------------------------------------------------------------------
--- 004_paiement_unique_et_reception.sql
--- -----------------------------------------------------------------------------
--- Axi : un client ne paie jamais deux fois la même commande, et l'argent n'est libéré qu'à la réception.
--- - orders.idempotency_key : clé envoyée par l'application (en-tête Idempotency-Key) ; une même clé
---   renvoie toujours la même commande, même après une coupure réseau ou un double appui.
--- - orders.request_hash : empreinte du panier ; sans clé, le même panier envoyé deux fois en 15 minutes
---   renvoie la commande déjà créée.
--- - payments : un seul paiement par commande, une seule référence par prestataire.
-
-
-ALTER TABLE orders
-  ADD COLUMN idempotency_key VARCHAR(64) NULL AFTER client_id,
-  ADD COLUMN request_hash CHAR(64) NULL AFTER idempotency_key,
-  ADD UNIQUE KEY uq_orders_idempotency (client_id, idempotency_key),
-  ADD KEY idx_orders_request (client_id, request_hash, created_at);
-
-ALTER TABLE payments
-  ADD COLUMN reference VARCHAR(40) NULL AFTER provider,
-  ADD COLUMN released_at DATETIME NULL AFTER status,
-  ADD UNIQUE KEY uq_payments_order (order_id),
-  ADD UNIQUE KEY uq_payments_reference (reference),
-  ADD UNIQUE KEY uq_payments_provider_ref (provider, provider_ref);
-
-ALTER TABLE order_stalls
-  ADD COLUMN picked_up_at DATETIME NULL AFTER ready_at,
-  ADD COLUMN delivered_at DATETIME NULL AFTER picked_up_at;
-
-INSERT INTO schema_migrations (file, applied_at) VALUES ('004_paiement_unique_et_reception.sql', UTC_TIMESTAMP());
+INSERT INTO schema_migrations (file, applied_at) VALUES ('001_schema.sql', UTC_TIMESTAMP());
