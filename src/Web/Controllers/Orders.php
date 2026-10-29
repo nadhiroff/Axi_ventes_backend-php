@@ -25,6 +25,7 @@ final class Orders
         'released' => ['Libéré au commerçant', 'ok'],
         'refunded' => ['Remboursé', 'muted'],
         'disputed' => ['Litige', 'danger'],
+        'cash' => ['Espèces à la remise', 'muted'],
     ];
 
     public static function escrowBadge(string $state): string
@@ -123,7 +124,7 @@ final class Orders
         }, $parts);
 
         $refundForm = $p !== null && in_array($p['status'], ['paid', 'partially_refunded'], true)
-            ? '<div class="card"><h2 style="margin-top:0">Rembourser le client</h2><p class="muted">Laissez le montant vide pour un remboursement total (articles et frais). Un remboursement partiel réduit d\'autant la part des commerçants.</p>'
+            ? '<div class="card"><h2>Rembourser le client</h2><p class="muted">Laissez le montant vide pour un remboursement total (articles et frais). Un remboursement partiel réduit d\'autant la part des commerçants.</p>'
                 . Html::form("$base/rembourser", [
                     'amount' => ['Montant (FCFA, vide = total)', 'number', '', ['attrs' => ' min="1"']],
                     'reason' => ['Motif', 'text', '', null],
@@ -132,7 +133,7 @@ final class Orders
 
         $disputeHtml = '';
         foreach ($disputes as $d) {
-            $disputeHtml .= '<div class="card"><h2 style="margin-top:0">Litige du ' . View::date($d['created_at']) . ' ' . View::badge(['open' => 'Ouvert', 'resolved_refund' => 'Remboursé', 'resolved_release' => 'Commerçants payés', 'rejected' => 'Rejeté'][$d['status']], $d['status'] === 'open' ? 'danger' : 'muted') . '</h2>'
+            $disputeHtml .= '<div class="card"><h2>Litige du ' . View::date($d['created_at']) . ' ' . View::badge(['open' => 'Ouvert', 'resolved_refund' => 'Remboursé', 'resolved_release' => 'Commerçants payés', 'rejected' => 'Rejeté'][$d['status']], $d['status'] === 'open' ? 'danger' : 'muted') . '</h2>'
                 . '<p>' . nl2br(View::e($d['reason'])) . '</p>'
                 . ($d['status'] === 'open'
                     ? Html::form('/pro/litiges/' . $d['id'], [

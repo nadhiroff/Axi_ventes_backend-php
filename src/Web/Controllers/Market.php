@@ -20,32 +20,93 @@ final class Market
         WebAuth::require(['axi']);
         $aisles = Database::all('SELECT a.*, (SELECT COUNT(*) FROM stalls s WHERE s.aisle_id = a.id) AS stalls FROM aisles a ORDER BY a.sort_order, a.name');
         $sites = Database::all('SELECT si.*, (SELECT COUNT(*) FROM stalls s WHERE s.site_id = si.id) AS stalls FROM sites si ORDER BY si.sort_order, si.name');
-        $body = '<div class="row2"><div><h2 style="margin-top:0">Allées (sous-marchés)</h2>'
+        // Noms saisis par les commerçants dans « Autre » : à créer pour tout le monde ou à ranger dans l'existant
+        $proposals = Database::all('SELECT s.id, s.name, s.site_other, s.aisle_other, u.name AS owner FROM stalls s JOIN users u ON u.id = s.user_id WHERE s.site_other IS NOT NULL OR s.aisle_other IS NOT NULL ORDER BY s.id');
+        $proposalsHtml = '';
+        if ($proposals !== []) {
+            $aisleOptions = ['new' => 'Créer cette allée pour tout le monde'] + Merchants::options('aisles', false);
+            $siteOptions = ['new' => 'Créer ce marché pour tout le monde'] + Merchants::options('sites', false);
+            $select = static function (string $name, array $options): string {
+                return '<select name="' . $name . '">' . implode('', array_map(static fn ($k, $v): string => '<option value="' . View::e($k) . '">' . View::e($v) . '</option>', array_keys($options), $options)) . '</select>';
+            };
+            $proposalsHtml = '<div class="card"><h2>Propositions des commerçants</h2><p class="note">Ces commerçants n\'ont pas trouvé leur allée ou leur marché dans la liste et ont écrit son nom. Créez-le pour tout le monde, ou rangez l\'étal dans une entrée existante.</p>'
+                . Html::table(['Étal', 'Proposition', 'Décision', ''], array_map(static function (array $p) use ($aisleOptions, $siteOptions, $select): array {
+                    $kind = $p['aisle_other'] !== null ? 'aisle' : 'site';
+                    $form = '<form method="post" action="' . View::url('/pro/allees/proposition/' . $p['id']) . '" class="actions">' . View::csrf()
+                        . '<input type="hidden" name="kind" value="' . $kind . '">' . $select('target', $kind === 'aisle' ? $aisleOptions : $siteOptions)
+                        . '<button class="btn sm" type="submit">Appliquer</button></form>';
+                    return [
+                        '<a href="' . View::url('/pro/commercants/' . $p['id']) . '">' . View::e($p['name']) . '</a><br><span class="muted small">' . View::e($p['owner']) . '</span>',
+                        View::badge(($kind === 'aisle' ? 'Allée : ' . $p['aisle_other'] : 'Marché : ' . $p['site_other']), 'warn'),
+                        $form, '',
+                    ];
+                }, $proposals)) . '</div>';
+        }
+        $body = $proposalsHtml . '<div class="row2"><div><h2>Allées (sous-marchés)</h2>'
             . Html::table(['Ordre', 'Allée', 'Icône', '#Étals', 'État', ''], array_map(static fn (array $a): array => [
                 (string) $a['sort_order'], '<strong>' . View::e($a['name']) . '</strong><br><span class="muted">' . View::e($a['id']) . '</span>', View::e(self::ICONS[$a['icon']]), (string) $a['stalls'],
                 $a['active'] ? View::badge('Visible', 'ok') : View::badge('Masquée'),
                 View::action('/pro/allees/allee', $a['active'] ? 'Masquer' : 'Afficher', ['id' => $a['id'], 'toggle' => '1'], $a['active'] ? 'Masquer cette allée dans l\'application ?' : null, 'btn ghost'),
             ], $aisles))
-            . '<div class="card" style="margin-top:14px"><h2 style="margin-top:0">Ajouter ou modifier une allée</h2>' . Html::form('/pro/allees/allee', [
+            . '<div class="card"><h2>Ajouter ou modifier une allée</h2>' . Html::form('/pro/allees/allee', [
                 'id' => ['Identifiant (minuscules, ex. chaussures)', 'text', '', ['attrs' => ' pattern="[a-z0-9-]{2,30}" required']],
                 'name' => ['Nom affiché', 'text', '', ['attrs' => ' required']],
                 'icon' => ['Icône', 'select', 'other', self::ICONS],
                 'sort_order' => ['Ordre d\'affichage', 'number', '10', null],
             ], 'Enregistrer l\'allée') . '</div></div>'
-            . '<div><h2 style="margin-top:0">Sites du marché</h2>'
+            . '<div><h2>Sites du marché</h2>'
             . Html::table(['Ordre', 'Site', 'Ville', '#Étals', 'État', ''], array_map(static fn (array $s): array => [
                 (string) $s['sort_order'], '<strong>' . View::e($s['name']) . '</strong><br><span class="muted">' . View::e($s['id']) . '</span>', View::e($s['city']), (string) $s['stalls'],
                 $s['active'] ? View::badge('Actif', 'ok') : View::badge('Inactif'),
                 View::action('/pro/allees/site', $s['active'] ? 'Désactiver' : 'Activer', ['id' => $s['id'], 'toggle' => '1'], $s['active'] ? 'Désactiver ce site ?' : null, 'btn ghost'),
             ], $sites))
-            . '<div class="card" style="margin-top:14px"><h2 style="margin-top:0">Ajouter ou modifier un site</h2>' . Html::form('/pro/allees/site', [
+            . '<div class="card"><h2>Ajouter ou modifier un site</h2>' . Html::form('/pro/allees/site', [
                 'id' => ['Identifiant (minuscules, ex. dantokpa)', 'text', '', ['attrs' => ' pattern="[a-z0-9-]{2,30}" required']],
                 'name' => ['Nom affiché', 'text', '', ['attrs' => ' required']],
                 'city' => ['Ville', 'text', 'Cotonou', null],
                 'map_url' => ['Plan d\'accès (lien https, facultatif)', 'text', '', null],
                 'sort_order' => ['Ordre d\'affichage', 'number', '10', null],
             ], 'Enregistrer le site') . '</div></div></div>';
-        Html::page('Sites et allées', $body, 'Le sous-marché du pilote n\'étant pas encore choisi, les allées et les sites se gèrent ici.');
+        Html::page('Allées et marchés', $body, 'Les allées et les marchés proposés dans l\'application se gèrent ici.');
+    }
+
+    /** Proposition « Autre » d'un commerçant : créer l'allée / le marché pour tout le monde, ou ranger l'étal ailleurs */
+    public function resolveProposal(Request $req): never
+    {
+        $agent = WebAuth::require(['axi']);
+        WebAuth::checkCsrf();
+        $stall = Database::one('SELECT * FROM stalls WHERE id = ?', [(int) ($req->params['id'] ?? 0)]) ?? View::redirect('/pro/allees', 'Étal introuvable.', 'err');
+        $aisle = ($_POST['kind'] ?? '') === 'aisle';
+        $table = $aisle ? 'aisles' : 'sites';
+        $proposed = $aisle ? $stall['aisle_other'] : $stall['site_other'];
+        if ($proposed === null) {
+            View::redirect('/pro/allees', 'Cette proposition a déjà été traitée.', 'err');
+        }
+        $target = (string) ($_POST['target'] ?? '');
+        if ($target === 'new') {
+            $id = trim((string) preg_replace('/[^a-z0-9]+/', '-', strtolower((string) iconv('UTF-8', 'ASCII//TRANSLIT', $proposed))), '-') ?: 'lieu';
+            $id = substr($id, 0, 24);
+            $existing = Database::value("SELECT id FROM $table WHERE LOWER(name) = LOWER(?)", [$proposed]);
+            if ($existing !== null) {
+                $target = (string) $existing;
+            } else {
+                while (Database::value("SELECT id FROM $table WHERE id = ?", [$id]) !== null) {
+                    $id = substr($id, 0, 20) . '-' . random_int(10, 99);
+                }
+                $aisle
+                    ? Database::run('INSERT INTO aisles (id, name, icon, sort_order) VALUES (?, ?, \'other\', 50)', [$id, $proposed])
+                    : Database::run('INSERT INTO sites (id, name, sort_order) VALUES (?, ?, 50)', [$id, $proposed]);
+                $target = $id;
+            }
+        } elseif (Database::value("SELECT id FROM $table WHERE id = ? AND active = 1", [$target]) === null) {
+            View::redirect('/pro/allees', 'Choix invalide.', 'err');
+        }
+        // Tous les étals qui ont proposé le même nom sont rangés d'un coup
+        $col = $aisle ? 'aisle' : 'site';
+        $n = Database::run("UPDATE stalls SET {$col}_id = ?, {$col}_other = NULL WHERE LOWER({$col}_other) = LOWER(?)", [$target, $proposed])->rowCount();
+        $req->user = $agent;
+        AdminLog::record($req, $col . '.proposal', $col, null, ['proposed' => $proposed, 'target' => $target, 'stalls' => $n]);
+        View::redirect('/pro/allees', '« ' . $proposed . ' » : ' . $n . ' étal(s) rangé(s).');
     }
 
     public function saveAisle(Request $req): never

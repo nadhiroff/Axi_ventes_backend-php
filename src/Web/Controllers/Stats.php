@@ -17,47 +17,98 @@ use Axi\Web\WebAuth;
  */
 final class Stats
 {
+    /**
+     * Tableau de bord, comme la maquette de la note de cadrage : quatre chiffres clés, prix médians et, à droite,
+     * une action utile au partenaire (nouvelle campagne, demandes de crédit, ou tout ce qu'un agent Axi doit traiter).
+     */
     public function dashboard(Request $req): never
     {
         $user = WebAuth::require();
-        $since = Clock::now(-30 * 86400);
-        $stalls = Database::one("SELECT COUNT(*) AS n, SUM(s.verified_at IS NOT NULL) AS verified, SUM(s.has_physical_place = 0) AS no_place, COUNT(DISTINCT s.site_id) AS sites FROM stalls s JOIN users u ON u.id = s.user_id WHERE s.status = 'active' AND u.status = 'active'");
-        $orders = Database::one("SELECT COUNT(*) AS n, COALESCE(SUM(total),0) AS amount, SUM(reception_mode = 'bus') AS outside FROM orders WHERE paid_at > ?", [$since]);
+        $type = $user['partner_type'];
         $min = Settings::int('min_group_size');
-        $enough = (int) $stalls['n'] >= $min;
-        $kpis = [
-            'Étals inscrits' => $enough ? (string) $stalls['n'] : "< $min",
-            'Étals vérifiés sur place' => $enough ? (string) (int) $stalls['verified'] : '—',
-            'Étals sans place' => $enough ? (string) (int) $stalls['no_place'] : '—',
-            'Sites actifs' => (string) $stalls['sites'],
-            'Commandes payées (30 j)' => $enough ? (string) $orders['n'] : '—',
-            'Commandes hors Cotonou (30 j)' => $enough && (int) $orders['n'] > 0 ? round(100 * $orders['outside'] / $orders['n']) . ' %' : '—',
-        ];
+        $month = Clock::now(-30 * 86400);
+        $stalls = Database::one("SELECT COUNT(*) AS n, SUM(s.has_physical_place = 0) AS no_place FROM stalls s JOIN users u ON u.id = s.user_id WHERE s.status = 'active' AND u.status = 'active'");
+        $active = Database::one("SELECT COUNT(DISTINCT os.stall_id) AS n, COUNT(DISTINCT s.site_id) AS sites FROM order_stalls os JOIN orders o ON o.id = os.order_id JOIN stalls s ON s.id = os.stall_id WHERE o.paid_at > ?", [$month]);
+        $orders = Database::one("SELECT COUNT(*) AS n, SUM(reception_mode = 'bus') AS outside FROM orders WHERE paid_at > ?", [$month]);
+        $credits = Database::one("SELECT COUNT(*) AS n FROM credits WHERE status IN ('granted','repaid')" . ($type === 'mfi' ? ' AND organization_id = ?' : ''), $type === 'mfi' ? [$user['organization_id']] : []);
+        $sites = (int) Database::value("SELECT COUNT(*) FROM sites WHERE active = 1 AND id <> 'autre'");
+        // Seuil d'anonymat pour les partenaires extérieurs ; l'équipe Axi voit les vrais chiffres
+        $enough = $type === 'axi' || (int) $stalls['n'] >= $min;
+        $hide = static fn (int|string $v): string => $enough ? (string) $v : '< ' . $min;
+        $kpis = Html::kpis([
+            'Étals recensés' => [$hide((int) $stalls['n']), $enough ? 'dont ' . (int) $stalls['no_place'] . ' sans place physique' : 'statistiques publiées à partir de ' . $min . ' étals'],
+            'Étals actifs ce mois' => [$enough ? (string) (int) $active['n'] : '—', 'sur ' . $sites . ' sites'],
+            'Commandes en ligne' => [$enough ? (string) (int) $orders['n'] : '—', $enough && (int) $orders['n'] > 0 ? 'dont ' . round(100 * $orders['outside'] / $orders['n']) . ' % hors Cotonou' : '30 derniers jours'],
+            'Crédits accordés via Axi' => [(string) (int) $credits['n'], 'avec l\'accord des commerçants'],
+        ]);
+
         $todo = '';
-        if ($user['partner_type'] === 'axi') {
-            $kpis['Montant payé (30 j)'] = View::fcfa($orders['amount']);
-            $counts = Database::one(
-                "SELECT (SELECT COUNT(*) FROM agent_visit_requests WHERE status IN ('new','scheduled')) AS visits,
+        if ($type === 'axi') {
+            $c = Database::one(
+                "SELECT (SELECT COUNT(*) FROM merchant_applications WHERE status = 'pending') AS applications,
                         (SELECT COUNT(*) FROM disputes WHERE status = 'open') AS disputes,
+                        (SELECT COUNT(*) FROM agent_visit_requests WHERE status IN ('new','scheduled')) AS visits,
+                        (SELECT COUNT(DISTINCT stall_id) FROM order_stalls WHERE escrow_state = 'released' AND payout_id IS NULL AND net_amount > 0) AS payouts,
                         (SELECT COUNT(*) FROM campaigns WHERE status = 'pending_review') AS campaigns,
-                        (SELECT COUNT(DISTINCT stall_id) FROM order_stalls WHERE escrow_state = 'released' AND payout_id IS NULL) AS payouts,
                         (SELECT COUNT(*) FROM payments WHERE status = 'pending' AND created_at < ?) AS stale",
                 [Clock::now(-3600)],
             );
-            $todo = '<h2>À traiter</h2><div class="grid">'
-                . self::todo('Vérifications sur place', (int) $counts['visits'], '/pro/verifications')
-                . self::todo('Litiges ouverts', (int) $counts['disputes'], '/pro/litiges')
-                . self::todo('Campagnes à relire', (int) $counts['campaigns'], '/pro/campagnes')
-                . self::todo('Commerçants à payer', (int) $counts['payouts'], '/pro/versements')
-                . self::todo('Paiements en attente depuis plus d\'1 h', (int) $counts['stale'], '/pro/paiements?status=pending')
-                . '</div>';
+            $todo = Html::title('À traiter') . str_replace('class="grid"', 'class="grid three"', Html::kpis([
+                'Demandes commerçants' => [(string) $c['applications'], 'pièces à vérifier', '/pro/demandes'],
+                'Litiges ouverts' => [(string) $c['disputes'], 'argent bloqué en attente', '/pro/litiges'],
+                'Commerçants à payer' => [(string) $c['payouts'], 'sommes libérées', '/pro/versements'],
+                'Vérifications sur place' => [(string) $c['visits'], 'étals déplacés', '/pro/verifications'],
+                'Campagnes à relire' => [(string) $c['campaigns'], 'annonceurs', '/pro/campagnes'],
+                'Paiements bloqués' => [(string) $c['stale'], 'en attente depuis plus d\'une heure', '/pro/paiements?status=pending'],
+            ]));
         }
-        Html::page('Bonjour ' . $user['first_name'], Html::kpis($kpis) . $todo, $user['org_name'] . ' · données agrégées et anonymes');
+
+        $prices = Database::all(
+            'SELECT ps.median_price, ps.sample_size, r.name AS product, si.name AS site,
+                    (SELECT old.median_price FROM price_stats_daily old WHERE old.product_ref_id = ps.product_ref_id AND old.site_id = ps.site_id AND old.day <= ps.day - INTERVAL 30 DAY AND old.sample_size >= ? ORDER BY old.day DESC LIMIT 1) AS old_price
+             FROM price_stats_daily ps JOIN product_refs r ON r.id = ps.product_ref_id JOIN sites si ON si.id = ps.site_id
+             WHERE ps.sample_size >= ? AND ps.day = (SELECT MAX(day) FROM price_stats_daily l WHERE l.product_ref_id = ps.product_ref_id AND l.site_id = ps.site_id)
+             ORDER BY ps.sample_size DESC LIMIT 8',
+            [$min, $min],
+        );
+        $priceCard = '<div class="card"><div class="section-title"><h2>Prix médians par produit</h2><a class="btn ghost sm" href="' . View::url('/pro/prix') . '">Toutes les tendances</a></div>'
+            . Html::table(['Produit', 'Site', '#Prix médian', '#Sur 30 jours'], array_map(static function (array $r): array {
+                $change = $r['old_price'] !== null && (int) $r['old_price'] > 0 ? round(100 * ((int) $r['median_price'] - (int) $r['old_price']) / (int) $r['old_price'], 1) : null;
+                return [View::e($r['product']), View::e($r['site']), number_format((int) $r['median_price'], 0, ',', ' ') . ' F', $change === null ? '—' : ($change > 0 ? '+' : '') . str_replace('.', ',', (string) $change) . ' %'];
+            }, $prices), 'Les prix médians apparaissent dès que ' . $min . ' étals vendent le même produit sur un site.') . '</div>';
+
+        $side = match ($type) {
+            'advertiser' => '<div class="card"><h2>Nouvelle campagne</h2>' . Html::form('/pro/campagnes', [
+                'aisle_id' => ['Public visé', 'select', '', ['' => 'Tous les commerçants et clients'] + Merchants::options('aisles', false)],
+                'site_id' => ['Site', 'select', '', ['' => 'Tous les sites'] + Merchants::options('sites', false)],
+                'format' => ['Format', 'select', 'supplier_offer', Campaigns::FORMATS],
+                'title' => ['Titre', 'text', '', ['attrs' => ' maxlength="150" required']],
+                'budget' => ['Budget (FCFA)', 'number', '', ['attrs' => ' min="' . Settings::int('min_campaign_budget') . '" required placeholder="' . number_format(Settings::int('min_campaign_budget'), 0, ',', ' ') . ' FCFA minimum"']],
+            ], 'Lancer la campagne') . '<p class="muted small" style="margin:14px 0 0">Le ciblage se fait dans Axi. Aucune donnée personnelle n\'est transmise à l\'annonceur.</p></div>',
+            'mfi', 'axi' => self::creditsCard($user),
+            default => '<div class="card"><h2>Recensement</h2><p class="muted">Répartition des étals par site et par allée, données agrégées et anonymes.</p><a class="btn" href="' . View::url('/pro/recensement') . '">Voir le recensement</a></div>',
+        };
+
+        Html::page(
+            'L\'espace des partenaires d\'Axi',
+            $kpis . $todo . '<div class="split">' . $priceCard . '<div>' . $side . '</div></div>',
+            'Bonjour ' . $user['first_name'] . '. Pour l\'ANaGeM, les annonceurs, les institutions de financement et l\'équipe Axi. Les données affichées aux partenaires sont agrégées et anonymes.',
+        );
     }
 
-    private static function todo(string $label, int $n, string $href): string
+    /** Dernières demandes de crédit (IMF : les siennes ; agent Axi : toutes) */
+    private static function creditsCard(array $user): string
     {
-        return '<a class="card kpi" style="text-decoration:none;color:inherit" href="' . View::url($href) . '"><div class="v">' . $n . '</div><div class="l">' . View::e($label) . '</div></a>';
+        $isAxi = $user['partner_type'] === 'axi';
+        $rows = Database::all(
+            "SELECT c.status, c.amount_requested, c.requested_at, s.name AS stall FROM credits c JOIN stalls s ON s.user_id = c.merchant_user_id
+             WHERE c.status IN ('new','in_review')" . ($isAxi ? '' : ' AND c.organization_id = ?') . ' ORDER BY c.id DESC LIMIT 6',
+            $isAxi ? [] : [$user['organization_id']],
+        );
+        $list = $rows === [] ? '<p class="muted">Aucune demande de crédit en attente.</p>' : '<dl>' . implode('', array_map(static fn (array $r): string =>
+            '<dt>' . View::e($r['stall']) . '</dt><dd>' . ($r['amount_requested'] !== null ? View::fcfa($r['amount_requested']) : 'Montant à définir') . ' · ' . ($r['status'] === 'new' ? View::badge('Nouvelle', 'warn') : View::badge('En étude')) . '</dd>', $rows)) . '</dl>';
+        return '<div class="card"><h2>Financement</h2>' . $list . '<p style="margin:16px 0 0"><a class="btn ghost" href="' . View::url('/pro/credits') . '">Toutes les demandes</a></p>'
+            . '<p class="muted small" style="margin:14px 0 0">Seuls les commerçants qui ont accepté de partager leur historique apparaissent.</p></div>';
     }
 
     /** Recensement des étals par site et par allée (groupes trop petits regroupés ou masqués) */
@@ -94,7 +145,7 @@ final class Stats
              JOIN stalls s ON s.id = os.stall_id JOIN sites si ON si.id = s.site_id WHERE o.paid_at > ? GROUP BY si.id, si.name HAVING stalls >= ? ORDER BY orders DESC",
             [Clock::now(-30 * 86400), $min],
         );
-        Html::page('Suivi d\'activité', '<h2 style="margin-top:0">Par mois</h2>' . Html::table(['Mois', '#Étals ayant vendu', '#Commandes', '#Ventes'], array_map(static fn (array $r): array => [
+        Html::page('Suivi d\'activité', '<h2>Par mois</h2>' . Html::table(['Mois', '#Étals ayant vendu', '#Commandes', '#Ventes'], array_map(static fn (array $r): array => [
             View::e($r['month']), (int) $r['stalls'] >= $min ? (string) $r['stalls'] : "< $min", (int) $r['stalls'] >= $min ? (string) $r['orders'] : '—', (int) $r['stalls'] >= $min ? View::fcfa($r['amount']) : '—',
         ], $rows), 'Pas encore de commandes payées.')
             . '<h2>Par site, 30 derniers jours</h2>' . Html::table(['Site', '#Étals ayant vendu', '#Commandes'], array_map(static fn (array $r): array => [View::e($r['site']), (string) $r['stalls'], (string) $r['orders']], $bySite), "Aucun site avec au moins $min étals actifs."));

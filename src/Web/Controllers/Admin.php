@@ -31,11 +31,11 @@ final class Admin
         foreach ($orgs as $o) {
             $orgOptions[$o['id']] = $o['name'] . ' (' . Users::PARTNER_TYPES[$o['type']] . ')';
         }
-        $body = '<div class="row2"><div class="card"><h2 style="margin-top:0">Nouvelle organisation</h2>' . Html::form('/pro/partenaires/organisation', [
+        $body = '<div class="row2"><div class="card"><h2>Nouvelle organisation</h2>' . Html::form('/pro/partenaires/organisation', [
             'name' => ['Nom', 'text', '', ['attrs' => ' required maxlength="150"']],
             'type' => ['Type', 'select', 'advertiser', Users::PARTNER_TYPES],
         ], 'Créer l\'organisation') . '</div>'
-            . '<div class="card"><h2 style="margin-top:0">Nouveau compte partenaire</h2><p class="muted">La personne reçoit un email avec un code pour choisir son mot de passe.</p>' . Html::form('/pro/partenaires/compte', [
+            . '<div class="card"><h2>Nouveau compte partenaire</h2><p class="muted">La personne reçoit un email avec un code pour choisir son mot de passe.</p>' . Html::form('/pro/partenaires/compte', [
                 'first_name' => ['Prénom', 'text', '', ['attrs' => ' required']],
                 'last_name' => ['Nom', 'text', '', ['attrs' => ' required']],
                 'email' => ['Email', 'email', '', ['attrs' => ' required']],
@@ -169,7 +169,7 @@ final class Admin
         WebAuth::require(['axi']);
         $actions = Database::all('SELECT a.*, u.name FROM admin_actions a JOIN users u ON u.id = a.actor_id ORDER BY a.id DESC LIMIT 200');
         $events = Database::all('SELECT * FROM payment_events ORDER BY id DESC LIMIT 200');
-        Html::page('Journal', '<h2 style="margin-top:0">Actions des partenaires</h2>' . Html::table(['Date', 'Qui', 'Action', 'Cible', 'Détails'], array_map(static fn (array $a): array => [
+        Html::page('Journal', '<h2>Actions des partenaires</h2>' . Html::table(['Date', 'Qui', 'Action', 'Cible', 'Détails'], array_map(static fn (array $a): array => [
             View::date($a['created_at']), View::e($a['name']), View::e($a['action']), View::e($a['target_type'] . ($a['target_id'] ? ' #' . $a['target_id'] : '')), '<code style="font-size:12px">' . View::e(mb_strimwidth((string) $a['details'], 0, 160, '…')) . '</code>',
         ], $actions)) . '<h2>Paiements et séquestre</h2>' . Html::table(['Date', 'Événement', 'Par', 'Commande', 'Avant → après', 'Référence', '#Montant'], array_map(static fn (array $e): array => [
             View::date($e['created_at']), View::e($e['event']), View::e($e['actor_type'] . ($e['actor_id'] ? ' #' . $e['actor_id'] : '')),

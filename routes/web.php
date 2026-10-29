@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 use Axi\Core\Router;
 use Axi\Web\Controllers\Admin;
+use Axi\Web\Controllers\Applications;
 use Axi\Web\Controllers\AuthPages;
 use Axi\Web\Controllers\Campaigns;
 use Axi\Web\Controllers\Clients;
@@ -12,6 +13,7 @@ use Axi\Web\Controllers\Merchants;
 use Axi\Web\Controllers\Money;
 use Axi\Web\Controllers\Orders;
 use Axi\Web\Controllers\Stats;
+use Axi\Web\Live;
 
 // Espace web des partenaires « Axi Pro ». Chaque contrôleur vérifie lui-même le sous-type (WebAuth::require)
 // et le jeton CSRF de chaque formulaire POST.
@@ -26,11 +28,19 @@ return static function (Router $r): void {
     $r->get('/pro/mon-compte', [AuthPages::class, 'account']);
     $r->post('/pro/mon-compte/mot-de-passe', [AuthPages::class, 'changePassword']);
 
+    $r->get('/pro/pulse', [Live::class, 'pulse']);
+
     $r->get('/pro', [Stats::class, 'dashboard']);
     $r->get('/pro/recensement', [Stats::class, 'census']);
     $r->get('/pro/activite', [Stats::class, 'activity']);
     $r->get('/pro/prix', [Stats::class, 'prices']);
     $r->get('/pro/ventes', [Stats::class, 'sales']);
+
+    $r->get('/pro/demandes', [Applications::class, 'index']);
+    $r->get('/pro/demandes/{id}', [Applications::class, 'show']);
+    $r->post('/pro/demandes/{id}/accepter', [Applications::class, 'approve']);
+    $r->post('/pro/demandes/{id}/refuser', [Applications::class, 'reject']);
+    $r->get('/pro/fichier', [Applications::class, 'file']);
 
     $r->get('/pro/commercants', [Merchants::class, 'index']);
     $r->get('/pro/commercants/{id}', [Merchants::class, 'show']);
@@ -64,6 +74,7 @@ return static function (Router $r): void {
     $r->get('/pro/allees', [Market::class, 'index']);
     $r->post('/pro/allees/allee', [Market::class, 'saveAisle']);
     $r->post('/pro/allees/site', [Market::class, 'saveSite']);
+    $r->post('/pro/allees/proposition/{id}', [Market::class, 'resolveProposal']);
 
     $r->get('/pro/campagnes', [Campaigns::class, 'index']);
     $r->post('/pro/campagnes', [Campaigns::class, 'create']);

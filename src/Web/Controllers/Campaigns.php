@@ -65,7 +65,7 @@ final class Campaigns
             foreach (Database::all("SELECT s.id, s.name, si.name AS site FROM stalls s JOIN sites si ON si.id = s.site_id JOIN users u ON u.id = s.user_id WHERE s.status = 'active' AND u.status = 'active' ORDER BY s.name LIMIT 500") as $s) {
                 $stalls[$s['id']] = $s['name'] . ' (' . $s['site'] . ')';
             }
-            $form = '<div class="card"><h2 style="margin-top:0">Nouvelle campagne</h2><p class="muted">Budget minimum : ' . View::fcfa(Settings::int('min_campaign_budget')) . '. Elle sera diffusée après relecture par l\'équipe Axi.</p>'
+            $form = '<div class="card"><h2>Nouvelle campagne</h2><p class="muted">Budget minimum : ' . View::fcfa(Settings::int('min_campaign_budget')) . '. Elle sera diffusée après relecture par l\'équipe Axi.</p>'
                 . Html::form('/pro/campagnes', [
                     'format' => ['Format', 'select', 'sponsored_home', self::FORMATS],
                     'audience_type' => ['Public', 'select', 'clients', ['clients' => 'Clients', 'merchants' => 'Commerçants']],

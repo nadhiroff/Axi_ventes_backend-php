@@ -66,14 +66,32 @@ final class View
         return '<input type="hidden" name="_csrf" value="' . self::e(WebAuth::csrf()) . '">';
     }
 
-    /** Formulaire POST d'une action, avec confirmation « Êtes-vous sûr… ? » si $confirm est donné */
+    /**
+     * Attributs de confirmation : la page affiche sa propre fenêtre « Êtes-vous sûr ? » (jamais confirm() du navigateur).
+     * Bouton « danger » = fenêtre rouge.
+     */
+    public static function confirmAttrs(?string $confirm, string $okLabel = 'Confirmer', bool $danger = false): string
+    {
+        if ($confirm === null) {
+            return '';
+        }
+        return ' data-confirm="' . self::e($confirm) . '" data-confirm-title="Êtes-vous sûr ?" data-confirm-ok="' . self::e($okLabel) . '"' . ($danger ? ' data-tone="danger"' : '');
+    }
+
+    /** Formulaire POST d'une action (un bouton), avec confirmation si $confirm est donné */
     public static function action(string $path, string $label, array $fields = [], ?string $confirm = null, string $class = 'btn'): string
     {
-        $html = '<form method="post" action="' . self::url($path) . '" class="inline"' . ($confirm !== null ? ' onsubmit="return confirm(' . self::e(json_encode($confirm, JSON_UNESCAPED_UNICODE)) . ')"' : '') . '>' . self::csrf();
+        $html = '<form method="post" action="' . self::url($path) . '" class="inline"' . self::confirmAttrs($confirm, $label, str_contains($class, 'danger')) . '>' . self::csrf();
         foreach ($fields as $name => $value) {
             $html .= '<input type="hidden" name="' . self::e($name) . '" value="' . self::e($value) . '">';
         }
         return $html . '<button type="submit" class="' . self::e($class) . '">' . self::e($label) . '</button></form>';
+    }
+
+    /** Lien vers un fichier privé (pièce d'identité…) servi uniquement aux agents Axi connectés */
+    public static function privateFile(string $path): string
+    {
+        return self::url('/pro/fichier', ['p' => $path, 's' => hash_hmac('sha256', $path, (string) \Axi\Core\Config::get('app_key') . WebAuth::csrf())]);
     }
 
     public static function badge(string $label, string $tone = 'muted'): string

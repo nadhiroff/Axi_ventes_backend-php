@@ -95,7 +95,7 @@ final class Merchants
         $id = (int) $s['id'];
         $base = '/pro/commercants/' . $id;
 
-        $info = '<div class="card"><h2 style="margin-top:0">Étal</h2><dl>'
+        $info = '<div class="card"><h2>Étal</h2><dl>'
             . '<dt>Commerçant</dt><dd>' . View::e($s['owner']) . ' · ' . View::e($s['email']) . '</dd>'
             . '<dt>Téléphone</dt><dd>' . View::e($s['phone'] ?? '—') . ' · WhatsApp ' . View::e($s['whatsapp'] ?? '—') . '</dd>'
             . '<dt>Emplacement</dt><dd>' . View::e(Stalls::location($s)['label']) . '</dd>'
@@ -112,12 +112,18 @@ final class Merchants
             . ($s['verified_at'] !== null ? View::action("$base/retirer-badge", 'Retirer le badge', [], 'Retirer le badge « vérifié » de cet étal ?', 'btn ghost') : '')
             . '</div></div>';
 
-        $verify = '<div class="card"><h2 style="margin-top:0">Vérification sur place</h2><p class="muted">Prenez une photo de l\'étal à son emplacement réel. Le badge « vérifié par un agent Axi » apparaît alors dans l\'application.</p>'
+        $application = Database::value('SELECT id FROM merchant_applications WHERE user_id = ? AND status = \'approved\' ORDER BY id DESC LIMIT 1', [$s['user_id']]);
+        $verify = '<div class="card"><h2>Vérification sur place</h2>'
+            . '<p class="note">Le badge « vérifié par un agent Axi » dit aux clients qu\'un agent a vu cet étal à cet emplacement. '
+            . 'La photo est <strong>facultative</strong> : elle sert de preuve en cas de litige ou de fraude, n\'est jamais montrée aux clients, '
+            . 'et remplace la photo de la demande si l\'étal a changé de place.</p>'
             . Html::form("$base/verifier", [
-                'photo' => ['Photo à l\'emplacement réel', 'file', '', null],
+                'photo' => ['Nouvelle photo à l\'emplacement réel (facultative)', 'file', '', null],
                 'row' => ['Rangée constatée', 'text', $s['row_label'] ?? '', null],
                 'stand' => ['Stand constaté', 'text', $s['stand'] ?? '', null],
-            ], 'Valider la vérification', 'Confirmer que vous avez vérifié cet étal sur place ?', true) . '</div>';
+            ], $s['verified_at'] !== null ? 'Confirmer à nouveau la vérification' : 'Valider la vérification', 'Vous confirmez avoir vu cet étal à cet emplacement.', true)
+            . ($application !== null ? '<p style="margin:14px 0 0"><a href="' . View::url('/pro/demandes/' . $application) . '">Voir la demande et les pièces d\'identité →</a></p>' : '')
+            . '</div>';
 
         $money = Html::kpis([
             'Bloqué (en attente de réception)' => View::fcfa($sums['held']),
@@ -126,11 +132,13 @@ final class Merchants
             'Commandes' => (string) $sums['orders'],
         ]) . ((int) $sums['released'] > 0 ? '<div class="actions" style="margin-bottom:16px">' . View::action("$base/verser", 'Verser ' . View::fcfa($sums['released']) . ' au commerçant', [], 'Confirmer le versement de ' . View::fcfa($sums['released']) . ' au commerçant ?', 'btn ok') . '</div>' : '');
 
-        $edit = '<div class="card"><h2 style="margin-top:0">Modifier l\'étal</h2>' . Html::form("$base/modifier", [
+        $edit = '<div class="card"><h2>Modifier l\'étal</h2>' . Html::form("$base/modifier", [
             'name' => ['Nom de l\'étal', 'text', $s['name'], null],
             'tagline' => ['Description', 'text', $s['tagline'], null],
-            'site_id' => ['Site', 'select', $s['site_id'], self::options('sites')],
+            'site_id' => ['Marché', 'select', $s['site_id'], self::options('sites')],
+            'site_other' => ['Nom du marché (si « Autre marché »)', 'text', $s['site_other'] ?? '', null],
             'aisle_id' => ['Allée', 'select', $s['aisle_id'], self::options('aisles')],
+            'aisle_other' => ['Nom de l\'allée (si « Autres »)', 'text', $s['aisle_other'] ?? '', null],
             'row' => ['Rangée', 'text', $s['row_label'] ?? '', null],
             'stand' => ['Stand', 'text', $s['stand'] ?? '', null],
             'merchant_type' => ['Profil', 'select', $s['merchant_type'], ['retail' => 'Détaillant', 'wholesale' => 'Grossiste']],
@@ -140,10 +148,11 @@ final class Merchants
         ], 'Enregistrer', 'Enregistrer les modifications de cet étal ?') . '</div>';
 
         $amount = Settings::subscriptionAmount($s['merchant_type']);
-        $sub = '<div class="card"><h2 style="margin-top:0">Abonnement</h2>'
+        $sub = '<div class="card"><h2>Abonnement</h2>'
             . Html::table(['Période', 'Formule', '#Montant', 'Payé par', 'Statut'], array_map(static fn (array $x): array => [
                 View::e(date('d/m/Y', strtotime($x['starts_on'])) . ' → ' . date('d/m/Y', strtotime($x['ends_on']))),
-                View::e($x['plan'] === 'wholesale' ? 'Gros' : 'Étal'), View::fcfa($x['amount']), View::e($x['paid_by']),
+                View::e(($x['plan'] === 'wholesale' ? 'Gros' : 'Étal') . ($x['period'] === 'year' ? ', 1 an' : ', 1 mois')), View::fcfa($x['amount']),
+                View::e(['merchant' => 'Commerçant', 'anagem' => 'ANaGeM', 'axi' => 'Offert par Axi'][$x['paid_by']]),
                 View::badge(['pending' => 'En attente', 'active' => 'Actif', 'cancelled' => 'Annulé'][$x['status']], $x['status'] === 'active' ? 'ok' : 'muted'),
             ], $subs), 'Aucun abonnement.')
             . '<p class="muted" style="margin-top:12px">Abonnement pris en charge par l\'ANaGeM ou offert par Axi (sans paiement du commerçant) :</p>'
@@ -152,14 +161,20 @@ final class Merchants
                 'months' => ['Durée (mois)', 'number', '1', ['attrs' => ' min="1" max="12"']],
             ], 'Activer l\'abonnement (' . View::fcfa($amount) . ' / mois)', 'Activer cet abonnement sans paiement du commerçant ?') . '</div>';
 
-        $productsHtml = '<h2>Catalogue</h2>' . Html::table(['Photo', 'Produit', '#Prix', 'Statut'], array_map(static fn (array $p): array => [
+        $productsHtml = Html::title('Catalogue') . Html::table(['Photo', 'Produit', '#Prix', 'Statut'], array_map(static fn (array $p): array => [
             $p['image'] !== null ? '<img src="' . View::e($p['image']['thumb_url']) . '" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px">' : '<span class="muted">—</span>',
             View::e($p['name']) . ($p['is_today'] ? ' ' . View::badge('Aujourd\'hui', 'ok') : ''),
             $p['price'] === null ? 'À débattre' : View::fcfa($p['price']['amount']) . ($p['price']['amount_max'] !== null ? ' – ' . View::fcfa($p['price']['amount_max']) : ''),
-            $p['status'] === 'draft' ? View::badge('Brouillon vocal', 'warn') : ($p['in_stock'] ? View::badge('En stock', 'ok') : View::badge('Épuisé')),
+            match (true) {
+                $p['status'] === 'draft' => View::badge('Brouillon vocal', 'warn'),
+                $p['status'] === 'paused' => View::badge('Masqué (limite sans abonnement)'),
+                $p['sold_out'] => View::badge('Épuisé', 'danger'),
+                !$p['in_stock'] => View::badge('Indisponible'),
+                default => View::badge($p['stock_quantity'] === null ? 'En vente' : 'En vente · stock ' . $p['stock_quantity'], 'ok'),
+            },
         ], $products), 'Aucun produit.');
 
-        $ordersHtml = '<h2>Dernières commandes</h2>' . Html::table(['Commande', 'Date', 'Client', '#Montant', 'Séquestre'], array_map(static fn (array $o): array => [
+        $ordersHtml = Html::title('Dernières commandes') . Html::table(['Commande', 'Date', 'Client', '#Montant', 'Séquestre'], array_map(static fn (array $o): array => [
             '<a href="' . View::url('/pro/commandes/' . $o['order_id']) . '">cmd_' . (int) $o['order_id'] . '</a>', View::date($o['created_at']), View::e($o['client']), View::fcfa($o['items_total']), Orders::escrowBadge($o['escrow_state']),
         ], $orders), 'Aucune commande.');
 
@@ -171,16 +186,16 @@ final class Merchants
         $agent = WebAuth::require(['axi']);
         WebAuth::checkCsrf();
         $s = $this->stall((int) ($req->params['id'] ?? 0));
+        // Photo facultative : preuve interne (litige, fraude) ; sans nouvelle photo, la précédente est gardée
         $file = $req->file('photo');
-        if ($file === null) {
-            View::redirect('/pro/commercants/' . $s['id'], 'La photo à l\'emplacement réel est obligatoire.', 'err');
+        $columns = ['verified_at' => Clock::now(), 'verified_by' => $agent['id'], 'updated_at' => Clock::now()];
+        if ($file !== null) {
+            try {
+                $columns['verification_photo_path'] = Uploads::photo($file)['path'];
+            } catch (HttpException $e) {
+                View::redirect('/pro/commercants/' . $s['id'], $e->getMessage(), 'err');
+            }
         }
-        try {
-            $photo = Uploads::photo($file);
-        } catch (HttpException $e) {
-            View::redirect('/pro/commercants/' . $s['id'], $e->getMessage(), 'err');
-        }
-        $columns = ['verified_at' => Clock::now(), 'verified_by' => $agent['id'], 'verification_photo_path' => $photo['path'], 'updated_at' => Clock::now()];
         foreach (['row' => 'row_label', 'stand' => 'stand'] as $field => $col) {
             $value = trim((string) ($_POST[$field] ?? ''));
             $columns[$col] = $value === '' ? null : mb_substr($value, 0, $field === 'row' ? 30 : 20);
@@ -248,9 +263,10 @@ final class Merchants
         $last = Database::value("SELECT MAX(ends_on) FROM subscriptions WHERE stall_id = ? AND status = 'active'", [$s['id']]);
         $start = $last !== null && $last >= Clock::localDate() ? date('Y-m-d', strtotime($last . ' +1 day')) : Clock::localDate();
         Database::run(
-            'INSERT INTO subscriptions (stall_id, plan, amount, paid_by, status, starts_on, ends_on, created_by, created_at) VALUES (?, ?, ?, ?, \'active\', ?, ?, ?, ?)',
-            [$s['id'], $s['merchant_type'], Settings::subscriptionAmount($s['merchant_type']), $paidBy, $start, date('Y-m-d', strtotime($start . ' +' . (30 * $months) . ' days')), $agent['id'], Clock::now()],
+            'INSERT INTO subscriptions (stall_id, plan, period, amount, paid_by, status, starts_on, ends_on, created_by, created_at) VALUES (?, ?, ?, ?, ?, \'active\', ?, ?, ?, ?)',
+            [$s['id'], $s['merchant_type'], $months >= 12 ? 'year' : 'month', Settings::subscriptionAmount($s['merchant_type']), $paidBy, $start, date('Y-m-d', strtotime($start . ' +' . (30 * $months) . ' days')), $agent['id'], Clock::now()],
         );
+        \Axi\Support\Subscription::resume((int) $s['id']);
         $this->log($req, $agent, 'subscription.grant', (int) $s['id'], ['paid_by' => $paidBy, 'months' => $months]);
         Notifier::send((int) $s['user_id'], 'account', 'Abonnement activé', 'Votre abonnement Axi est actif (' . ($paidBy === 'anagem' ? 'inclus dans votre place' : 'offert par Axi') . ').');
         View::redirect('/pro/commercants/' . $s['id'], 'Abonnement activé.');
@@ -315,11 +331,12 @@ final class Merchants
         AdminLog::record($req, $action, 'stall', $stallId, $details);
     }
 
-    /** @return array<string, string> */
-    public static function options(string $table): array
+    /** @return array<string, string> $withOther : inclure « Autre marché » / « Autres » */
+    public static function options(string $table, bool $withOther = true): array
     {
         $out = [];
-        foreach (Database::all("SELECT id, name FROM $table WHERE active = 1 ORDER BY sort_order, name") as $r) {
+        $where = $withOther ? '' : " AND id NOT IN ('" . StallInput::OTHER_SITE . "', '" . StallInput::OTHER_AISLE . "')";
+        foreach (Database::all("SELECT id, name FROM $table WHERE active = 1$where ORDER BY sort_order, name") as $r) {
             $out[$r['id']] = $r['name'];
         }
         return $out;
