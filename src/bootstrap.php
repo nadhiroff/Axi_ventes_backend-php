@@ -1,15 +1,20 @@
 <?php
 declare(strict_types=1);
 
-// Démarrage commun à l'API (public/index.php) et aux tâches planifiées (cron/run.php)
+// Démarrage commun à l'API (public/index.php), aux tâches planifiées (cron/run.php) et aux scripts (database/)
 
-use Axi\Core\Autoload;
 use Axi\Core\Config;
+use Axi\Core\Env;
 
 define('BASE_PATH', dirname(__DIR__));
 
-require BASE_PATH . '/src/Core/Autoload.php';
-Autoload::register(BASE_PATH . '/src');
+if (!is_file(BASE_PATH . '/vendor/autoload.php')) {
+    http_response_code(500);
+    exit('Dépendances absentes : lancez « composer install » dans ' . BASE_PATH . PHP_EOL);
+}
+require BASE_PATH . '/vendor/autoload.php';
+
+Env::load(BASE_PATH . '/.env');
 Config::load(require BASE_PATH . '/config/config.php');
 
 date_default_timezone_set('UTC');
