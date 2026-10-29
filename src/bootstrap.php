@@ -4,7 +4,6 @@ declare(strict_types=1);
 // Démarrage commun à l'API (public/index.php), aux tâches planifiées (cron/run.php) et aux scripts (database/)
 
 use Axi\Core\Config;
-use Axi\Core\Env;
 
 define('BASE_PATH', dirname(__DIR__));
 
@@ -14,7 +13,6 @@ if (!is_file(BASE_PATH . '/vendor/autoload.php')) {
 }
 require BASE_PATH . '/vendor/autoload.php';
 
-Env::load(BASE_PATH . '/.env');
 Config::load(require BASE_PATH . '/config/config.php');
 
 date_default_timezone_set('UTC');
