@@ -6,7 +6,7 @@ namespace Axi\Services;
 use Axi\Core\Database;
 use Axi\Core\Validator;
 
-/** Champs d'un étal saisis par un agent (création, correction) ou par le commerçant (sa vitrine) */
+/** Champs d'un étal, saisis par le commerçant (création, gestion) ou par un agent Axi (espace web) */
 final class StallInput
 {
     public const LABELS = [
@@ -15,8 +15,8 @@ final class StallInput
         'delivery_note' => 'Livraison', 'map_url' => 'Plan', 'merchant_type' => 'Type de commerçant',
     ];
 
-    /** Ce que le commerçant peut changer seul ; l'emplacement reste vérifié par un agent */
-    public const MERCHANT_FIELDS = ['tagline', 'phone', 'whatsapp', 'accepts_voice_messages', 'pay_on_delivery', 'delivery_note', 'is_open'];
+    /** Champs d'emplacement : leur changement retire le badge « vérifié » jusqu'à la visite d'un agent */
+    public const LOCATION_FIELDS = ['site_id', 'row_label', 'stand', 'has_physical_place'];
 
     /** @return array colonnes de la table stalls */
     public static function validate(array $data, bool $creating, ?array $only = null): array
@@ -43,10 +43,10 @@ final class StallInput
         }
         $in = Validator::validate($data, $rules, self::LABELS);
 
-        if (isset($in['site_id']) && Database::value('SELECT id FROM sites WHERE id = ?', [$in['site_id']]) === null) {
+        if (isset($in['site_id']) && Database::value('SELECT id FROM sites WHERE id = ? AND active = 1', [$in['site_id']]) === null) {
             Validator::fail(['site_id' => 'Site inconnu.'], self::LABELS);
         }
-        if (isset($in['aisle_id']) && Database::value('SELECT id FROM aisles WHERE id = ?', [$in['aisle_id']]) === null) {
+        if (isset($in['aisle_id']) && Database::value('SELECT id FROM aisles WHERE id = ? AND active = 1', [$in['aisle_id']]) === null) {
             Validator::fail(['aisle_id' => 'Allée inconnue.'], self::LABELS);
         }
         if (isset($in['map_url']) && !preg_match('#^https://#', $in['map_url'])) {

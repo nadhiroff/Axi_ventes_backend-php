@@ -9,7 +9,7 @@ use Axi\Core\HttpException;
 use Axi\Core\Ids;
 use Axi\Core\Request;
 use Axi\Core\Response;
-use Axi\Services\Orders;
+use Axi\Services\Payment\Escrow;
 use Axi\Support\Merchant;
 
 /** « Ma journée » */
@@ -44,13 +44,13 @@ final class TodayController
                 'id' => Ids::encode('cmd', $row['order_id']),
                 'customer_name' => $row['customer_name'],
                 'customer_phone' => $row['payment_phone'],
-                'summary' => implode(', ', array_map(static fn (array $i): string => $i['quantity'] . ' × ' . $i['name'], $items)) . ' · ' . Orders::receptionLabel($row),
+                'summary' => implode(', ', array_map(static fn (array $i): string => $i['quantity'] . ' × ' . $i['name'], $items)) . ' · ' . self::receptionLabel($row),
                 'status' => $row['status'],
                 'status_label' => self::STATUS_LABELS[$row['status']],
             ];
         }
 
-        $subscription = Database::one('SELECT ends_on FROM subscriptions WHERE stall_id = ? ORDER BY ends_on DESC LIMIT 1', [$stall['id']]);
+        $subscription = Database::one('SELECT ends_on FROM subscriptions WHERE stall_id = ? AND status = \'active\' ORDER BY ends_on DESC LIMIT 1', [$stall['id']]);
         $active = $subscription !== null && $subscription['ends_on'] >= Clock::localDate();
 
         Response::ok([
@@ -73,7 +73,8 @@ final class TodayController
             ?? throw new HttpException(404, 'ORDER_NOT_FOUND', 'Commande introuvable.');
         if ($part['status'] === 'to_prepare') {
             Database::run('UPDATE order_stalls SET status = \'ready\', ready_at = ? WHERE id = ?', [Clock::now(), $part['id']]);
-            Orders::syncStatus($orderId);
+            Escrow::syncPreparation($orderId);
+            Escrow::log('stall_ready', ['order' => $orderId, 'stall_part' => $part['id']], 'merchant', $req->userId(), 'to_prepare', 'ready');
         } elseif ($part['status'] !== 'ready') {
             throw new HttpException(409, 'ORDER_NOT_PREPARABLE', 'Cette commande ne peut plus être marquée prête.');
         }
@@ -93,5 +94,15 @@ final class TodayController
             'already_sent' => $stall['relocation_sent_at'] !== null && $stall['relocation_sent_at'] >= $stall['moved_at'],
             'client_count' => (int) Database::value('SELECT COUNT(*) FROM merchant_clients WHERE stall_id = ?', [$stall['id']]),
         ];
+    }
+
+    /** « Livraison Akpakpa », « Expédition car Parakou », « Retrait Point Axi Tokpa Yôyô » */
+    private static function receptionLabel(array $order): string
+    {
+        return match ($order['reception_mode']) {
+            'delivery' => 'Livraison ' . $order['reception_detail'],
+            'bus' => 'Expédition car ' . $order['reception_detail'],
+            'axi_point' => 'Retrait ' . ($order['axi_point_name'] ?? 'au point Axi'),
+        };
     }
 }

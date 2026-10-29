@@ -109,6 +109,30 @@ final class Request
         return is_array($file) && ($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE ? $file : null;
     }
 
+    /**
+     * Plusieurs fichiers : champ « photos[] » (tableau PHP) et/ou « photo », dans l'ordre d'envoi.
+     * @return array<int, array>
+     */
+    public function files(string $multiple, string $single, int $max): array
+    {
+        $out = [];
+        if (($one = $this->file($single)) !== null) {
+            $out[] = $one;
+        }
+        $many = $_FILES[$multiple] ?? null;
+        if (is_array($many) && is_array($many['name'] ?? null)) {
+            foreach (array_keys($many['name']) as $i) {
+                if (($many['error'][$i] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE) {
+                    $out[] = ['name' => $many['name'][$i], 'type' => $many['type'][$i], 'tmp_name' => $many['tmp_name'][$i], 'error' => $many['error'][$i], 'size' => $many['size'][$i]];
+                }
+            }
+        }
+        if (count($out) > $max) {
+            throw new HttpException(422, 'VALIDATION_ERROR', "$max photos maximum.", ['fields' => ['photos' => "$max photos maximum."]]);
+        }
+        return $out;
+    }
+
     public function header(string $name): ?string
     {
         return $this->headers[strtolower($name)] ?? null;

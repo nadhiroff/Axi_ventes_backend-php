@@ -11,14 +11,19 @@ use Axi\Core\Ids;
 use Axi\Core\Request;
 use Axi\Core\Response;
 use Axi\Core\Validator;
-use Axi\Services\Broadcasts;
+use Axi\Services\Broadcaster;
+use Axi\Services\Settings;
 use Axi\Services\Uploads;
 use Axi\Support\Merchant;
+use Axi\Support\Stalls;
 
-/** « Mes clients » : le fichier clients appartient au commerçant ; relances et messages groupés */
+/**
+ * « Mes clients » : le fichier clients appartient au commerçant (issu des commandes et des ajouts manuels).
+ * Relances et messages par notification Axi, email et lien WhatsApp ; jamais par SMS.
+ */
 final class ClientsController
 {
-    private const LABELS = ['display_name' => 'Nom', 'phone' => 'Téléphone', 'kind' => 'Type de client', 'segment' => 'Clients', 'channel' => 'Canal'];
+    private const LABELS = ['display_name' => 'Nom', 'phone' => 'Téléphone', 'email' => 'Email', 'kind' => 'Type de client', 'segment' => 'Clients', 'note' => 'Note'];
 
     public function index(Request $req): never
     {
@@ -28,6 +33,12 @@ final class ClientsController
             Validator::fail(['segment' => 'Valeur non autorisée.'], self::LABELS);
         }
         [$where, $params] = $this->segmentSql($segment);
+        $search = trim((string) $req->query('q', ''));
+        if ($search !== '') {
+            $where .= ' AND (display_name LIKE ? OR phone LIKE ? OR email LIKE ?)';
+            $like = '%' . addcslashes($search, '%_\\') . '%';
+            array_push($params, $like, $like, $like);
+        }
         $rows = Database::all("SELECT * FROM merchant_clients WHERE stall_id = ? AND $where ORDER BY COALESCE(last_order_at, created_at) DESC LIMIT 500", [$stall['id'], ...$params]);
 
         [$loyalWhere, $loyalParams] = $this->segmentSql('loyal');
@@ -43,34 +54,107 @@ final class ClientsController
         ], 200, 60);
     }
 
+    /** Fiche client : coordonnées, note, historique de ses commandes chez ce commerçant */
+    public function show(Request $req): never
+    {
+        $stall = Merchant::stall($req);
+        $client = $this->find($req, (int) $stall['id']);
+        $orders = $client['user_id'] === null ? [] : Database::all(
+            'SELECT o.id, o.created_at, os.items_total, os.status, os.escrow_state FROM order_stalls os JOIN orders o ON o.id = os.order_id
+             WHERE os.stall_id = ? AND o.client_id = ? AND o.status <> \'awaiting_payment\' ORDER BY o.id DESC LIMIT 100',
+            [$stall['id'], $client['user_id']],
+        );
+        Response::ok($this->present($client) + [
+            'email' => $client['email'],
+            'kind' => $client['kind'],
+            'note' => $client['note'],
+            'orders_count' => (int) $client['orders_count'],
+            'total_spent' => (int) $client['total_spent'],
+            'has_axi_account' => $client['user_id'] !== null,
+            'orders' => array_map(static function (array $o): array {
+                $items = Database::all('SELECT oi.name, oi.quantity FROM order_items oi JOIN order_stalls os ON os.id = oi.order_stall_id WHERE os.order_id = ?', [$o['id']]);
+                return [
+                    'id' => Ids::encode('cmd', $o['id']),
+                    'date' => Clock::iso($o['created_at']),
+                    'amount' => (int) $o['items_total'],
+                    'summary' => implode(', ', array_map(static fn (array $i): string => $i['quantity'] . ' × ' . $i['name'], $items)),
+                    'status' => $o['status'],
+                    'escrow_state' => $o['escrow_state'],
+                ];
+            }, $orders),
+        ]);
+    }
+
     public function create(Request $req): never
     {
         $stall = Merchant::stall($req);
         $in = Validator::validate($req->all(), [
             'display_name' => 'required|string|max:100',
-            'phone' => 'required|phone',
+            'phone' => 'phone',
+            'email' => 'email',
             'kind' => 'required|in:individual,reseller',
+            'note' => 'string|max:300',
         ], self::LABELS);
-        if (Database::value('SELECT id FROM merchant_clients WHERE stall_id = ? AND phone = ?', [$stall['id'], $in['phone']]) !== null) {
+        if (!isset($in['phone']) && !isset($in['email'])) {
+            Validator::fail(['phone' => 'Indiquez un téléphone ou un email.'], self::LABELS);
+        }
+        if (isset($in['phone']) && Database::value('SELECT id FROM merchant_clients WHERE stall_id = ? AND phone = ?', [$stall['id'], $in['phone']]) !== null) {
             throw new HttpException(409, 'CLIENT_EXISTS', 'Ce numéro est déjà dans votre fichier clients.');
         }
-        $userId = Database::value('SELECT id FROM users WHERE phone = ?', [$in['phone']]);
+        // Rattachement au compte Axi du client s'il en a un (même email ou même téléphone)
+        $userId = Database::value('SELECT id FROM users WHERE status = \'active\' AND ((email = ?) OR (phone IS NOT NULL AND phone = ?))', [$in['email'] ?? '', $in['phone'] ?? '']);
+        if ($userId !== null && Database::value('SELECT id FROM merchant_clients WHERE stall_id = ? AND user_id = ?', [$stall['id'], $userId]) !== null) {
+            throw new HttpException(409, 'CLIENT_EXISTS', 'Ce client est déjà dans votre fichier clients.');
+        }
         $id = Database::insert(
-            'INSERT INTO merchant_clients (stall_id, user_id, display_name, phone, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-            [$stall['id'], $userId, $in['display_name'], $in['phone'], $in['kind'], Clock::now()],
+            'INSERT INTO merchant_clients (stall_id, user_id, display_name, phone, email, kind, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [$stall['id'], $userId, $in['display_name'], $in['phone'] ?? null, $in['email'] ?? null, $in['kind'], $in['note'] ?? null, Clock::now()],
         );
         Response::ok($this->present(Database::one('SELECT * FROM merchant_clients WHERE id = ?', [$id])), 201);
+    }
+
+    public function update(Request $req): never
+    {
+        $stall = Merchant::stall($req);
+        $client = $this->find($req, (int) $stall['id']);
+        $body = $req->all();
+        $in = Validator::validate($body, [
+            'display_name' => 'string|max:100',
+            'phone' => 'phone',
+            'email' => 'email',
+            'kind' => 'in:individual,reseller',
+            'note' => 'string|max:300',
+        ], self::LABELS);
+        foreach (['phone', 'email', 'note'] as $key) {
+            if (array_key_exists($key, $body) && ($body[$key] === null || $body[$key] === '')) {
+                $in[$key] = null;
+            }
+        }
+        if (isset($in['phone']) && Database::value('SELECT id FROM merchant_clients WHERE stall_id = ? AND phone = ? AND id <> ?', [$stall['id'], $in['phone'], $client['id']]) !== null) {
+            throw new HttpException(409, 'CLIENT_EXISTS', 'Ce numéro est déjà dans votre fichier clients.');
+        }
+        if ($in !== []) {
+            Database::updateById('merchant_clients', (int) $client['id'], $in);
+        }
+        Response::ok($this->present(Database::one('SELECT * FROM merchant_clients WHERE id = ?', [$client['id']])));
+    }
+
+    /** Retirer un client de son fichier (confirmation demandée dans l'application) */
+    public function delete(Request $req): never
+    {
+        $stall = Merchant::stall($req);
+        $client = $this->find($req, (int) $stall['id']);
+        Database::run('DELETE FROM merchant_clients WHERE id = ?', [$client['id']]);
+        Response::ok(['deleted' => true]);
     }
 
     public function followUp(Request $req): never
     {
         $stall = Merchant::stall($req);
-        $id = $req->id('cli', 'CLIENT_NOT_FOUND', 'Ce client n\'est pas dans votre fichier.');
-        $client = Database::one('SELECT * FROM merchant_clients WHERE id = ? AND stall_id = ?', [$id, $stall['id']])
-            ?? throw new HttpException(404, 'CLIENT_NOT_FOUND', 'Ce client n\'est pas dans votre fichier.');
-        Broadcasts::record((int) $stall['id'], 'follow_up', 'axi', null, $stall['name'] . ' pense à vous : de nouveaux produits vous attendent sur Axi.', [$client['phone']]);
-        Database::run('UPDATE merchant_clients SET last_follow_up_at = ? WHERE id = ?', [Clock::now(), $id]);
-        Response::ok(['recipients' => 1, 'message' => 'Relance envoyée à ' . $client['display_name'] . '.']);
+        $client = $this->find($req, (int) $stall['id']);
+        $result = Broadcaster::send($stall, 'follow_up', null, $stall['name'] . ' pense à vous', 'De nouveaux produits vous attendent chez ' . $stall['name'] . ' (' . Stalls::location($stall)['label'] . '). Commandez sur Axi et payez à la réception.', [$client]);
+        Database::run('UPDATE merchant_clients SET last_follow_up_at = ? WHERE id = ?', [Clock::now(), $client['id']]);
+        Response::ok($result);
     }
 
     public function broadcast(Request $req): never
@@ -78,33 +162,24 @@ final class ClientsController
         $stall = Merchant::stall($req);
         $in = Validator::validate($req->all(), [
             'segment' => 'required|in:all,resellers,loyal,to_follow_up',
-            'channel' => 'required|in:axi,whatsapp',
+            'channel' => 'in:axi,whatsapp',
+            'text' => 'string|max:400',
         ], self::LABELS);
-        $phones = $this->phones((int) $stall['id'], $in['segment']);
-        $n = Broadcasts::record((int) $stall['id'], 'segment', $in['channel'], $in['segment'], 'Nouvel arrivage chez ' . $stall['name'] . ' : ' . Config::get('city.name') . ', ' . $stall['site_name'] . '.', $phones);
-        $who = $in['segment'] === 'loyal' ? Merchant::plural($n, 'client fidèle', 'clients fidèles') : Merchant::plural($n, 'client');
-        Response::ok([
-            'recipients' => $n,
-            'message' => $n === 0 ? 'Aucun client dans cette liste pour l\'instant.'
-                : ($in['channel'] === 'whatsapp' ? "Message prêt à partager sur WhatsApp avec vos $who." : "Message envoyé à vos $who."),
-        ]);
+        $text = $in['text'] ?? 'Nouvel arrivage chez ' . $stall['name'] . ' (' . Stalls::location($stall)['label'] . '). Commandez sur Axi.';
+        Response::ok(Broadcaster::send($stall, 'segment', $in['segment'], 'Nouvel arrivage chez ' . $stall['name'], $text, $this->clients((int) $stall['id'], $in['segment'])));
     }
 
     /** « Envoyer ma nouvelle adresse » à tout le fichier clients */
     public function relocation(Request $req): never
     {
         $stall = Merchant::stall($req);
-        $location = \Axi\Support\Stalls::location($stall);
-        $phones = $this->phones((int) $stall['id'], 'all');
-        $text = $stall['name'] . ' a déménagé. Nouvelle adresse : ' . $location['label'] . '.' . ($location['map_url'] !== null ? ' Plan : ' . $location['map_url'] : '');
-        $n = Broadcasts::record((int) $stall['id'], 'relocation', 'axi', 'all', $text, $phones);
-        if ($n > 0) {
+        $location = Stalls::location($stall);
+        $text = $stall['name'] . ' vous accueille à sa nouvelle adresse : ' . $location['label'] . '.' . ($location['map_url'] !== null ? ' Plan : ' . $location['map_url'] : '');
+        $result = Broadcaster::send($stall, 'relocation', 'all', 'Nouvelle adresse de ' . $stall['name'], $text, $this->clients((int) $stall['id'], 'all'));
+        if ($result['recipients'] > 0) {
             Database::run('UPDATE stalls SET relocation_sent_at = ? WHERE id = ?', [Clock::now(), $stall['id']]);
         }
-        Response::ok([
-            'recipients' => $n,
-            'message' => $n === 0 ? 'Ajoutez d\'abord vos clients pour leur envoyer votre nouvelle adresse.' : 'Nouvelle adresse envoyée à ' . Merchant::plural($n, 'client') . '.',
-        ]);
+        Response::ok($result);
     }
 
     /** « Annoncer un arrivage en vocal » aux clients fidèles */
@@ -112,18 +187,20 @@ final class ClientsController
     {
         $stall = Merchant::stall($req);
         $audio = $req->file('audio') ?? Validator::fail(['audio' => 'Enregistrez votre message vocal.'], ['audio' => 'Message vocal']);
-        $phones = $this->phones((int) $stall['id'], 'loyal');
-        $n = Broadcasts::record((int) $stall['id'], 'arrival', 'axi', 'loyal', 'Arrivage chez ' . $stall['name'] . ' (message vocal)', $phones, Uploads::audio($audio));
-        Response::ok([
-            'recipients' => $n,
-            'message' => $n === 0 ? 'Message enregistré. Vous n\'avez pas encore de clients fidèles.' : 'Arrivage annoncé à vos ' . Merchant::plural($n, 'client fidèle', 'clients fidèles') . '.',
-        ]);
+        Response::ok(Broadcaster::send($stall, 'arrival', 'loyal', 'Arrivage chez ' . $stall['name'], 'Écoutez le message vocal de ' . $stall['name'] . ' sur ses nouveaux produits.', $this->clients((int) $stall['id'], 'loyal'), Uploads::audio($audio)));
     }
 
-    private function phones(int $stallId, string $segment): array
+    private function find(Request $req, int $stallId): array
+    {
+        $id = $req->id('cli', 'CLIENT_NOT_FOUND', 'Ce client n\'est pas dans votre fichier.');
+        return Database::one('SELECT * FROM merchant_clients WHERE id = ? AND stall_id = ?', [$id, $stallId])
+            ?? throw new HttpException(404, 'CLIENT_NOT_FOUND', 'Ce client n\'est pas dans votre fichier.');
+    }
+
+    private function clients(int $stallId, string $segment): array
     {
         [$where, $params] = $this->segmentSql($segment);
-        return array_column(Database::all("SELECT phone FROM merchant_clients WHERE stall_id = ? AND $where", [$stallId, ...$params]), 'phone');
+        return Database::all("SELECT * FROM merchant_clients WHERE stall_id = ? AND $where", [$stallId, ...$params]);
     }
 
     /** @return array{0: string, 1: array} */
@@ -131,20 +208,20 @@ final class ClientsController
     {
         return match ($segment) {
             'resellers' => ['kind = \'reseller\'', []],
-            'loyal' => ['orders_count >= ?', [(int) Config::get('customers.loyal_min_orders')]],
-            'to_follow_up' => ['last_order_at < ?', [Clock::now(-86400 * (int) Config::get('customers.follow_up_days'))]],
+            'loyal' => ['orders_count >= ?', [Settings::int('loyal_min_orders')]],
+            'to_follow_up' => ['last_order_at < ?', [Clock::now(-86400 * Settings::int('follow_up_days'))]],
             default => ['1', []],
         };
     }
 
     private function present(array $c): array
     {
-        $followUpBefore = Clock::now(-86400 * (int) Config::get('customers.follow_up_days'));
-        $newAfter = Clock::now(-86400 * (int) Config::get('customers.new_days'));
+        $followUpBefore = Clock::now(-86400 * Settings::int('follow_up_days'));
+        $newAfter = Clock::now(-86400 * 7);
         $badge = match (true) {
             $c['last_order_at'] !== null && $c['last_order_at'] < $followUpBefore => ['kind' => 'follow_up', 'label' => 'Relancer'],
             (int) $c['orders_count'] <= 1 && max($c['created_at'], $c['last_order_at'] ?? '') >= $newAfter => ['kind' => 'new', 'label' => 'Nouveau'],
-            (int) $c['orders_count'] >= (int) Config::get('customers.loyal_min_orders') => ['kind' => 'loyal', 'label' => 'Fidèle'],
+            (int) $c['orders_count'] >= Settings::int('loyal_min_orders') => ['kind' => 'loyal', 'label' => 'Fidèle'],
             default => null,
         };
         $kind = $c['kind'] === 'reseller' ? 'Revendeur' : 'Particulier';
@@ -154,11 +231,12 @@ final class ClientsController
             'display_name' => $c['display_name'],
             'description' => "$kind · $when",
             'phone' => $c['phone'],
+            'email' => $c['email'],
             'badge' => $badge,
         ];
     }
 
-    /** « aujourd'hui », « hier », « il y a 5 jours », « il y a 6 semaines », « il y a 3 mois » (jours à l'heure du Bénin) */
+    /** « aujourd'hui », « hier », « il y a 5 jours », « il y a 6 semaines », « il y a 3 mois » (heure du Bénin) */
     private static function ago(string $datetime): string
     {
         $zone = new \DateTimeZone((string) Config::get('timezone'));
