@@ -7,7 +7,7 @@ use Axi\Core\Database;
 
 final class User
 {
-    private const COLUMNS = 'id, phone, name, role, lang, status, created_at';
+    private const COLUMNS = 'id, phone, name, org_name, role, lang, status, created_at';
 
     public static function findById(int $id): ?array
     {
@@ -34,6 +34,7 @@ final class User
             'phone' => $user['phone'],
             'role' => $user['role'],
             'lang' => $user['lang'],
+            'org_name' => $user['org_name'] ?? null,
         ];
     }
 }

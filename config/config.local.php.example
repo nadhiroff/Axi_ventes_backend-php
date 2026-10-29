@@ -10,4 +10,10 @@ return [
         'user' => 'admin',
         'pass' => 'Admin',
     ],
+    // Clés de test fournies par FedaPay et Kkiapay (tableau de bord développeur)
+    'payments' => [
+        'mode' => 'sandbox',
+        'fedapay' => ['secret_key' => ''],
+        'kkiapay' => ['public_key' => '', 'private_key' => '', 'secret' => ''],
+    ],
 ];

@@ -32,22 +32,33 @@ final class Request
         // Apache peut transmettre Authorization sous un autre nom après réécriture
         $headers['authorization'] ??= $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? null;
 
-        return new self($method, self::resolvePath(), $_GET, self::parseBody(), $headers);
+        [$path, $base] = self::resolvePath();
+        Url::setBase((string) (Config::get('public_url') ?: self::origin() . $base));
+
+        return new self($method, $path, $_GET, self::parseBody(), $headers);
     }
 
-    /** Chemin relatif à l'application, que l'API soit à la racine ou dans un sous-dossier. */
-    private static function resolvePath(): string
+    /**
+     * Chemin relatif à l'application, que l'API soit à la racine ou dans un sous-dossier.
+     * Renvoie [chemin, préfixe retiré].
+     */
+    private static function resolvePath(): array
     {
         $path = rawurldecode(parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/');
-        $base = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
-        foreach ([$base, (string) preg_replace('#/public$#', '', $base)] as $prefix) {
+        $script = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
+        foreach ([$script, (string) preg_replace('#/public$#', '', $script)] as $prefix) {
             if ($prefix !== '' && str_starts_with($path, $prefix . '/')) {
-                $path = substr($path, strlen($prefix));
-                break;
+                return ['/' . trim(substr($path, strlen($prefix)), '/'), $prefix];
             }
         }
-        $path = '/' . trim($path, '/');
-        return $path;
+        return ['/' . trim($path, '/'), ''];
+    }
+
+    private static function origin(): string
+    {
+        $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+            || ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https';
+        return ($https ? 'https' : 'http') . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost');
     }
 
     private static function parseBody(): array
@@ -63,6 +74,10 @@ final class Request
                 throw new HttpException(400, 'INVALID_JSON', 'Corps JSON invalide');
             }
             return $data;
+        }
+        // Au-delà de post_max_size, PHP vide silencieusement $_POST et $_FILES
+        if ($_POST === [] && $_FILES === [] && (int) ($_SERVER['CONTENT_LENGTH'] ?? 0) > 0 && str_contains($type, 'multipart/form-data')) {
+            throw new HttpException(413, 'FILE_TOO_LARGE', 'Fichier trop volumineux');
         }
         return $_POST;
     }
@@ -82,6 +97,18 @@ final class Request
         return $this->query[$key] ?? $default;
     }
 
+    public function queryAll(): array
+    {
+        return $this->query;
+    }
+
+    /** Fichier envoyé en multipart/form-data, ou null */
+    public function file(string $name): ?array
+    {
+        $file = $_FILES[$name] ?? null;
+        return is_array($file) && ($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE ? $file : null;
+    }
+
     public function header(string $name): ?string
     {
         return $this->headers[strtolower($name)] ?? null;
@@ -91,5 +118,20 @@ final class Request
     {
         $auth = $this->header('authorization') ?? '';
         return preg_match('/^Bearer\s+(\S+)$/i', $auth, $m) ? $m[1] : null;
+    }
+
+    /** Identifiant numérique de l'URL ({id}), 404 s'il n'est pas valide */
+    public function id(string $name = 'id'): int
+    {
+        $value = $this->params[$name] ?? '';
+        if (!preg_match('/^[1-9]\d{0,9}$/', $value)) {
+            throw new HttpException(404, 'NOT_FOUND', 'Ressource introuvable');
+        }
+        return (int) $value;
+    }
+
+    public function userId(): int
+    {
+        return (int) $this->user['id'];
     }
 }
