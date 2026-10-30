@@ -88,14 +88,66 @@ final class ClientsController
         ]);
     }
 
+    /**
+     * Recherche d'un compte Axi par email ou téléphone EXACT (jamais par nom : la liste des inscrits reste privée).
+     * Renvoie une présentation minimale et le type détecté : un commerçant qui achète chez un autre est un revendeur.
+     */
+    public function lookup(Request $req): never
+    {
+        $stall = Merchant::stall($req);
+        $contact = trim((string) $req->query('contact', ''));
+        $email = Validator::email($contact);
+        $phone = $email === null ? Validator::phone($contact) : null;
+        if ($email === null && $phone === null) {
+            Response::ok(['found' => false, 'valid' => false]);
+        }
+        $u = Database::one(
+            "SELECT * FROM users WHERE status = 'active' AND role IN ('client','merchant') AND id <> ? AND " . ($email !== null ? 'email = ?' : 'phone = ?'),
+            [$req->userId(), $email ?? $phone],
+        );
+        if ($u === null) {
+            Response::ok(['found' => false, 'valid' => true, 'contact' => ['email' => $email, 'phone' => $phone]]);
+        }
+        $existing = Database::value('SELECT id FROM merchant_clients WHERE stall_id = ? AND user_id = ?', [$stall['id'], $u['id']]);
+        $theirStall = $u['role'] === 'merchant' ? Database::value('SELECT name FROM stalls WHERE user_id = ?', [$u['id']]) : null;
+        Response::ok([
+            'found' => true,
+            'valid' => true,
+            'contact' => ['email' => $email, 'phone' => $phone],
+            'user' => [
+                'id' => Ids::encode('usr', $u['id']),
+                'display_name' => trim($u['first_name'] . ' ' . mb_substr($u['last_name'], 0, 1) . '.'),
+                'avatar' => \Axi\Support\Users::avatarFor($u, $req->userId(), false),
+                'role' => $u['role'],
+                'stall_name' => $theirStall,
+            ],
+            'kind_detected' => $u['role'] === 'merchant' ? 'reseller' : 'individual',
+            'existing_client_id' => $existing === null ? null : Ids::encode('cli', $existing),
+        ]);
+    }
+
+    /**
+     * Ajouter un client : { contact (email ou téléphone), display_name? } ; si un compte Axi correspond, il est
+     * rattaché (nom repris) et le type est détecté (commerçant = revendeur). kind / note restent possibles.
+     */
     public function create(Request $req): never
     {
         $stall = Merchant::stall($req);
-        $in = Validator::validate($req->all(), [
-            'display_name' => 'required|string|max:100',
+        $body = $req->all();
+        // « contact » : un seul champ email ou téléphone, reconnu automatiquement
+        if (isset($body['contact']) && is_string($body['contact'])) {
+            $contact = trim($body['contact']);
+            if (Validator::email($contact) !== null) {
+                $body['email'] = $contact;
+            } else {
+                $body['phone'] = $contact;
+            }
+        }
+        $in = Validator::validate($body, [
+            'display_name' => 'string|max:100',
             'phone' => 'phone',
             'email' => 'email',
-            'kind' => 'required|in:individual,reseller',
+            'kind' => 'in:individual,reseller',
             'note' => 'string|max:300',
         ], self::LABELS);
         if (!isset($in['phone']) && !isset($in['email'])) {
@@ -105,13 +157,23 @@ final class ClientsController
             throw new HttpException(409, 'CLIENT_EXISTS', 'Ce numéro est déjà dans votre fichier clients.');
         }
         // Rattachement au compte Axi du client s'il en a un (même email ou même téléphone)
-        $userId = Database::value('SELECT id FROM users WHERE status = \'active\' AND ((email = ?) OR (phone IS NOT NULL AND phone = ?))', [$in['email'] ?? '', $in['phone'] ?? '']);
+        $user = Database::one('SELECT * FROM users WHERE status = \'active\' AND role IN (\'client\',\'merchant\') AND id <> ? AND ((email = ?) OR (phone IS NOT NULL AND phone = ?))', [$req->userId(), $in['email'] ?? '', $in['phone'] ?? '']);
+        $userId = $user === null ? null : (int) $user['id'];
         if ($userId !== null && Database::value('SELECT id FROM merchant_clients WHERE stall_id = ? AND user_id = ?', [$stall['id'], $userId]) !== null) {
             throw new HttpException(409, 'CLIENT_EXISTS', 'Ce client est déjà dans votre fichier clients.');
         }
+        $name = trim((string) ($in['display_name'] ?? ''));
+        if ($name === '' && $user !== null) {
+            $name = trim($user['first_name'] . ' ' . mb_substr($user['last_name'], 0, 1) . '.');
+        }
+        if ($name === '') {
+            Validator::fail(['display_name' => 'Indiquez le nom du client.'], self::LABELS);
+        }
+        // Type détecté : un commerçant inscrit sur Axi qui achète chez vous est un revendeur
+        $kind = $in['kind'] ?? (($user['role'] ?? null) === 'merchant' ? 'reseller' : 'individual');
         $id = Database::insert(
             'INSERT INTO merchant_clients (stall_id, user_id, display_name, phone, email, kind, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [$stall['id'], $userId, $in['display_name'], $in['phone'] ?? null, $in['email'] ?? null, $in['kind'], $in['note'] ?? null, Clock::now()],
+            [$stall['id'], $userId, $name, $in['phone'] ?? null, $in['email'] ?? ($user['email'] ?? null), $kind, $in['note'] ?? null, Clock::now()],
         );
         Response::ok($this->present(Database::one('SELECT * FROM merchant_clients WHERE id = ?', [$id])), 201);
     }

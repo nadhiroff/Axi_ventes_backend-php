@@ -138,6 +138,7 @@ return static function (Router $r): void {
     $r->post('/v1/merchant/arrivals', [ClientsController::class, 'arrival'], $merchant);
     $r->get('/v1/merchant/clients', [ClientsController::class, 'index'], $merchant);
     $r->post('/v1/merchant/clients', [ClientsController::class, 'create'], $merchant);
+    $r->get('/v1/merchant/clients/lookup', [ClientsController::class, 'lookup'], $merchant);
     $r->get('/v1/merchant/clients/{id}', [ClientsController::class, 'show'], $merchant);
     $r->patch('/v1/merchant/clients/{id}', [ClientsController::class, 'update'], $merchant);
     $r->delete('/v1/merchant/clients/{id}', [ClientsController::class, 'delete'], $merchant);
