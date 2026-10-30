@@ -263,4 +263,36 @@ final class CatalogController
     {
         Response::ok(\Axi\Services\Rates::current(), 200, 3600);
     }
+
+    /**
+     * Écrire un email au commerçant depuis la page de son étal : son adresse reste cachée ; il répond
+     * directement au client (« Répondre » de sa messagerie). 5 emails par heure et par client au plus.
+     */
+    public function emailStall(Request $req): never
+    {
+        $id = $this->stallId($req);
+        $me = $req->userId();
+        $in = \Axi\Core\Validator::validate($req->all(), ['subject' => 'string|max:150', 'message' => 'required|string|max:2000'], ['subject' => 'Objet', 'message' => 'Message']);
+        $message = trim($in['message']);
+        if (mb_strlen($message) < 5) {
+            \Axi\Core\Validator::fail(['message' => 'Écrivez votre message.'], ['message' => 'Message']);
+        }
+        if ((int) Database::value('SELECT COUNT(*) FROM stall_emails WHERE user_id = ? AND created_at > ?', [$me, Clock::now(-3600)]) >= 5) {
+            throw new HttpException(429, 'TOO_MANY_REQUESTS', 'Vous avez envoyé plusieurs emails en peu de temps. Réessayez dans une heure, ou écrivez dans la messagerie Axi.', ['retry_after' => 3600]);
+        }
+        $stall = Database::one('SELECT s.name, u.email, u.first_name FROM stalls s JOIN users u ON u.id = s.user_id WHERE s.id = ?', [$id]);
+        $client = Database::one('SELECT first_name, last_name, email FROM users WHERE id = ?', [$me]);
+        $from = trim($client['first_name'] . ' ' . mb_substr($client['last_name'], 0, 1) . '.');
+        $subject = trim((string) ($in['subject'] ?? '')) ?: 'Message d\'un client sur Axi';
+        [, $html, $text] = \Axi\Services\EmailTemplates::message(
+            $subject . ' (' . $stall['name'] . ')',
+            $stall['first_name'],
+            ["$from vous écrit depuis la page de votre étal « {$stall['name']} » sur Axi :", $message, 'Répondez simplement à cet email : votre réponse lui arrive directement.'],
+        );
+        if (!\Axi\Services\Mailer::send($stall['email'], $subject . ' · ' . $from, $html, $text, $client['email'], $from)) {
+            throw new HttpException(503, 'MAIL_UNAVAILABLE', 'L\'email n\'a pas pu partir. Réessayez dans un instant, ou écrivez dans la messagerie Axi.');
+        }
+        Database::run('INSERT INTO stall_emails (stall_id, user_id, subject, created_at) VALUES (?, ?, ?, ?)', [$id, $me, mb_substr($subject, 0, 150), Clock::now()]);
+        Response::ok(['message' => 'Email envoyé au commerçant. Sa réponse arrivera dans votre boîte email (' . $client['email'] . ').']);
+    }
 }
