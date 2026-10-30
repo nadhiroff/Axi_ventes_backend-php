@@ -405,8 +405,12 @@ $r = call('POST', "/v1/merchant/clients/$cli/follow-up", null, $merchant);
 check('relance : notification dans l\'app + lien WhatsApp (aucun SMS)', ($r['body']['data']['notified'] ?? 0) === 1 && str_starts_with((string) $r['body']['data']['whatsapp_url'], 'https://wa.me/'), $r['raw']);
 $r = call('POST', '/v1/merchant/clients', ['display_name' => 'Tantine Rose', 'email' => "rose-$stamp@example.com", 'kind' => 'reseller'], $merchant);
 check('ajout manuel d\'un client (email, sans téléphone)', $r['status'] === 201, $r['raw']);
+$look = call('GET', '/v1/merchant/clients/lookup?contact=' . urlencode("sim-commercant2-$stamp@example.com"), null, $merchant)['body']['data'] ?? [];
+check('ajout d\'un client : compte Axi détecté par son email, commerçant = revendeur', ($look['found'] ?? false) === true && $look['kind_detected'] === 'reseller' && !isset($look['user']['email']), json_encode($look));
+$r = call('POST', '/v1/merchant/clients', ['contact' => "sim-commercant2-$stamp@example.com"], $merchant);
+check('ajouté en un geste : nom repris du compte, type revendeur détecté', $r['status'] === 201 && Database::value('SELECT kind FROM merchant_clients WHERE id = ?', [id($r['body']['data']['id'] ?? 'cli_0')]) === 'reseller', $r['raw']);
 $r = call('POST', '/v1/merchant/relocation/broadcast', null, $merchant);
-check('nouvelle adresse : app + email + lien WhatsApp', ($r['body']['data']['recipients'] ?? 0) === 2 && $r['body']['data']['notified'] === 1 && $r['body']['data']['emailed'] >= 1, $r['raw']);
+check('nouvelle adresse : app + email + lien WhatsApp', ($r['body']['data']['recipients'] ?? 0) === 3 && $r['body']['data']['notified'] === 2 && $r['body']['data']['emailed'] >= 1, $r['raw']);
 check('crédit refusé sans consentement', call('POST', '/v1/merchant/credit-requests', null, $merchant)['body']['error']['code'] === 'DATA_SHARING_REQUIRED');
 call('PUT', '/v1/merchant/data-sharing', ['enabled' => true], $merchant);
 check('consentement enregistré (date, périmètre) puis demande de crédit', Database::value('SELECT scope FROM data_sharing_consents WHERE merchant_user_id = ? AND revoked_at IS NULL', [$merchantId]) !== null
