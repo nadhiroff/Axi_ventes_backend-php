@@ -263,6 +263,24 @@ final class ClientsController
         Response::ok(Stalls::announcement(Database::one('SELECT * FROM stall_announcements WHERE id = ?', [$a['id']])));
     }
 
+    /** Ajouter ou changer la photo d'une annonce (multipart « photo ») */
+    public function announcementPhoto(Request $req): never
+    {
+        $a = $this->ownAnnouncement($req);
+        $file = $req->file('photo') ?? Validator::fail(['photo' => 'Choisissez une photo.'], ['photo' => 'Photo']);
+        $photo = Uploads::photo($file);
+        Database::run('UPDATE stall_announcements SET photo_path = ?, photo_width = ?, photo_height = ? WHERE id = ?', [$photo['path'], $photo['width'], $photo['height'], $a['id']]);
+        Response::ok(Stalls::announcement(Database::one('SELECT * FROM stall_announcements WHERE id = ?', [$a['id']])));
+    }
+
+    /** Retirer la photo d'une annonce (le texte reste) */
+    public function removeAnnouncementPhoto(Request $req): never
+    {
+        $a = $this->ownAnnouncement($req);
+        Database::run('UPDATE stall_announcements SET photo_path = NULL, photo_width = NULL, photo_height = NULL WHERE id = ?', [$a['id']]);
+        Response::ok(Stalls::announcement(Database::one('SELECT * FROM stall_announcements WHERE id = ?', [$a['id']])));
+    }
+
     /** Supprimer une de mes annonces d'arrivage (elle disparaît de l'étal et de l'accueil) */
     public function deleteAnnouncement(Request $req): never
     {
