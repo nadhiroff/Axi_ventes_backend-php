@@ -3,6 +3,7 @@
 /config/config.local.php.bak
 /config/config.local.php
 /storage/audio/
+/storage/video/
 /storage/logs/*
 !/storage/logs/.gitkeep
 /public/uploads/*

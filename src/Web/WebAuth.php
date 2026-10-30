@@ -21,7 +21,7 @@ final class WebAuth
     public const MENUS = [
         ['/pro', 'Tableau de bord', self::ALL],
         ['/pro/prix', 'Tendances du marché', self::ALL],
-        ['/pro/campagnes', 'Campagnes', ['axi', 'advertiser']],
+        ['/pro/campagnes', 'Annonces', ['axi', 'advertiser']],
         ['/pro/recensement', 'Recensement des étals', ['axi', 'anagem']],
         ['/pro/credits', 'Financement', ['axi', 'mfi']],
     ];
@@ -30,7 +30,7 @@ final class WebAuth
     public const MANAGE = [
         ['/pro/demandes', 'Demandes commerçants'],
         ['/pro/commercants', 'Commerçants'],
-        ['/pro/clients', 'Utilisateurs (bloquer, débloquer)'],
+        ['/pro/clients', 'Utilisateurs'],
         ['/pro/signalements', 'Signalements'],
         ['/pro/commandes', 'Commandes et litiges'],
         ['/pro/paiements', 'Paiements et versements'],

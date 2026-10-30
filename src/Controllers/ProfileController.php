@@ -27,6 +27,10 @@ final class ProfileController
         $id = $req->id('usr', 'USER_NOT_FOUND', 'Profil introuvable.');
         $u = Database::one("SELECT * FROM users WHERE id = ? AND status <> 'deleted' AND role IN ('client','merchant')", [$id])
             ?? throw new HttpException(404, 'USER_NOT_FOUND', 'Profil introuvable.');
+        // Compte bloqué : comme un compte banni, plus aucun profil visible (il revient tel quel au déblocage)
+        if ($id !== $me && $u['status'] !== 'active') {
+            throw new HttpException(404, 'ACCOUNT_UNAVAILABLE', 'Ce compte n\'est plus disponible.');
+        }
         if ($id !== $me && !$this->related($me, $id) && !$this->foundByContact($me, $u, (string) $req->query('contact', ''))) {
             throw new HttpException(404, 'USER_NOT_FOUND', 'Profil introuvable.');
         }

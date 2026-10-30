@@ -482,6 +482,8 @@ final class ClientsController
             'follows' => $follows,
             // Ajouté à la main : accepted, pending (en attente de sa réponse) ou declined (refusé)
             'invite_status' => $c['invite_status'] ?? 'accepted',
+            // Compte bloqué par Axi : pas de profil ni de discussion ; il revient seul au déblocage
+            'unavailable' => $user !== null && $user['status'] !== 'active',
             'last_message' => $last === null ? null : [
                 'preview' => $last['deleted_at'] !== null ? '🚫 Message supprimé' : match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', 'video' => '🎥 Vidéo', default => mb_substr((string) $last['body'], 0, 80) },
                 'mine' => (int) $last['sender_id'] !== (int) $c['user_id'],

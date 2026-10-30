@@ -57,6 +57,7 @@ return static function (Router $r): void {
     $r->get('/pro/signalements', [Reports::class, 'index']);
     $r->post('/pro/signalements/{id}/bloquer', [Reports::class, 'block']);
     $r->post('/pro/signalements/{id}/classer', [Reports::class, 'dismiss']);
+    $r->post('/pro/signalements/{id}/debloquer', [Reports::class, 'unblock']);
 
     $r->get('/pro/clients', [Clients::class, 'index']);
     $r->get('/pro/clients/{id}', [Clients::class, 'show']);
@@ -84,10 +85,17 @@ return static function (Router $r): void {
     $r->get('/pro/campagnes', [Campaigns::class, 'index']);
     $r->post('/pro/campagnes', [Campaigns::class, 'create']);
     $r->post('/pro/campagnes/{id}/statut', [Campaigns::class, 'setStatus']);
+    $r->post('/pro/campagnes/{id}/supprimer', [Campaigns::class, 'destroy']);
+    $r->post('/pro/campagnes/{id}/relancer', [Campaigns::class, 'relaunch']);
+    $r->post('/pro/campagnes/{id}/signalements', [Campaigns::class, 'dismissReports']);
+    $r->get('/pro/campagnes/{id}/modifier', [Campaigns::class, 'edit']);
+    $r->post('/pro/campagnes/{id}/modifier', [Campaigns::class, 'update']);
 
     $r->get('/pro/credits', [Credits::class, 'index']);
     $r->get('/pro/credits/dossier/{id}', [Credits::class, 'file']);
     $r->post('/pro/credits/{id}', [Credits::class, 'update']);
+    $r->post('/pro/credits/{id}/versement', [Credits::class, 'disburse']);
+    $r->post('/pro/credits/{id}/remboursement', [Credits::class, 'repayment']);
 
     $r->get('/pro/partenaires', [Admin::class, 'partners']);
     $r->post('/pro/partenaires/organisation', [Admin::class, 'createOrganization']);
