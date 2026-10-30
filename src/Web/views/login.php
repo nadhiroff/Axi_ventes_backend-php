@@ -2,7 +2,7 @@
 <div class="card">
 <?php if ($mode === 'login'): ?>
   <h1>Connexion</h1>
-  <p class="sub" style="margin-bottom:20px">Agents Axi, ANaGeM, annonceurs et institutions de financement.</p>
+  <p class="sub" style="margin-bottom:20px">Connectez-vous à votre espace partenaire.</p>
   <form method="post" action="<?= View::url('/pro/connexion') ?>" class="form">
     <?= View::csrf() ?>
     <div class="full"><label for="email">Adresse email</label><input id="email" name="email" type="email" autocomplete="username" required autofocus value="<?= View::e($email ?? '') ?>"></div>

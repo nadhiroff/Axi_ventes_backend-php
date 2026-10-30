@@ -28,6 +28,9 @@ final class Broadcaster
         $emailed = 0;
         $audioUrl = $audioPath === null ? null : SignedUrl::make('/v1/media/audio', ['p' => $audioPath], 30 * 86400);
         $data = ['stall_id' => Ids::encode('stl', $stall['id'])] + ($audioUrl !== null ? ['audio_url' => $audioUrl] : []);
+        // Comptes bloqués écartés : ils ne reçoivent plus rien
+        $blocked = array_flip(array_column(Database::all("SELECT id FROM users WHERE status <> 'active'"), 'id'));
+        $clients = array_values(array_filter($clients, static fn (array $c): bool => $c['user_id'] === null || !isset($blocked[$c['user_id']])));
         foreach ($clients as $client) {
             if ($client['user_id'] !== null) {
                 $sent = Notifier::send((int) $client['user_id'], $type, $title, $text, $data);

@@ -14,15 +14,40 @@ final class Auth
         }
         $row = self::resolve($token);
         if ($row === null) {
+            // Session coupée par un blocage : la personne doit savoir pourquoi, pas lire « session expirée »
+            $reason = Database::one('SELECT u.suspended_reason FROM auth_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ? AND u.status = \'suspended\'', [hash('sha256', $token)]);
+            if ($reason !== null) {
+                throw self::suspended($reason['suspended_reason']);
+            }
             throw new HttpException(401, 'UNAUTHENTICATED', 'Votre session a expiré. Reconnectez-vous.');
         }
         if ($row['status'] !== 'active') {
-            throw new HttpException(403, 'ACCOUNT_SUSPENDED', 'Votre compte est suspendu. Contactez l\'équipe Axi.');
+            throw self::suspended($row['suspended_reason'] ?? null);
         }
         if ($roles && !in_array($row['role'], $roles, true)) {
             throw new HttpException(403, 'FORBIDDEN', 'Votre profil ne donne pas accès à cette page.');
         }
         self::login($request, $row);
+    }
+
+    /** Même texte partout : à la connexion, ou quand le blocage arrive pendant que l'application est ouverte */
+    public static function suspendedMessage(?string $reason): string
+    {
+        $contact = self::supportEmail();
+        return 'Votre accès à Axi a été bloqué par l\'équipe Axi.' . ($reason ? ' Motif : ' . $reason : '')
+            . ($contact !== '' ? " Pour en savoir plus, écrivez à $contact." : '');
+    }
+
+    /** Adresse à contacter (Réglages), sinon celle qui envoie les emails d'Axi */
+    public static function supportEmail(): string
+    {
+        return trim(\Axi\Services\Settings::text('support_email')) ?: (string) Config::get('mail.from_address');
+    }
+
+    /** Refus d'un compte bloqué : le message, et l'adresse pour le bouton « Contacter » de l'application */
+    public static function suspended(?string $reason): HttpException
+    {
+        return new HttpException(403, 'ACCOUNT_SUSPENDED', self::suspendedMessage($reason), ['support_email' => self::supportEmail()]);
     }
 
     /** Routes publiques : reconnaît l'utilisateur s'il envoie un jeton valide, sinon reste anonyme. */

@@ -48,6 +48,7 @@ return static function (Router $r): void {
     $r->post('/v1/me/data-usage', [AccountController::class, 'dataUsage'], $user);
     $r->delete('/v1/me/data-usage', [AccountController::class, 'resetDataUsage'], $user);
     $r->post('/v1/me/push-token', [AccountController::class, 'savePushToken'], $user);
+    $r->post('/v1/promotions/{id}/report', [CatalogController::class, 'promotionReport'], $user);
     $r->get('/v1/me/client-invites', [AccountController::class, 'clientInvites'], $user);
     $r->post('/v1/me/client-invites/{id}/{answer}', [AccountController::class, 'answerClientInvite'], $user);
     $r->get('/v1/me/sessions', [AccountController::class, 'sessions'], $user);
@@ -91,12 +92,14 @@ return static function (Router $r): void {
     // Client : accueil, allées, recherche, étals, produits (visite libre)
     $r->get('/v1/home', [CatalogController::class, 'home'], Router::OPTIONAL);
     $r->get('/v1/rates', [CatalogController::class, 'rates'], Router::OPTIONAL);
+    $r->get('/v1/live', [CatalogController::class, 'live']);
     $r->get('/v1/aisles/{id}/stalls', [CatalogController::class, 'aisle'], Router::OPTIONAL);
     $r->get('/v1/search', [CatalogController::class, 'search'], Router::OPTIONAL);
     $r->post('/v1/search/voice', [CatalogController::class, 'voiceSearch'], Router::OPTIONAL);
     $r->get('/v1/stalls/{id}', [CatalogController::class, 'stall'], Router::OPTIONAL);
     $r->get('/v1/products/{id}', [CatalogController::class, 'product'], Router::OPTIONAL);
     $r->post('/v1/promotions/{id}/click', [CatalogController::class, 'promotionClick']);
+    $r->post('/v1/promotions/{id}/view', [CatalogController::class, 'promotionView']);
     $r->post('/v1/stalls/{id}/follow', [CatalogController::class, 'follow'], $user);
     $r->delete('/v1/stalls/{id}/follow', [CatalogController::class, 'unfollow'], $user);
     $r->post('/v1/stalls/{id}/voice-messages', [CatalogController::class, 'voiceMessage'], $user);
@@ -112,6 +115,7 @@ return static function (Router $r): void {
     $r->post('/v1/orders/{id}/confirm-receipt', [OrderController::class, 'confirmReceipt'], $user);
     $r->post('/v1/orders/{id}/dispute', [OrderController::class, 'dispute'], $user);
     $r->get('/v1/sales', [SalesController::class, 'index'], $user);
+    $r->post('/v1/sales/hide', [SalesController::class, 'hide'], $user);
     $r->post('/v1/sales/export', [SalesController::class, 'exportLink'], $user);
     $r->get('/v1/sales/export.csv', [SalesController::class, 'export']);
 
@@ -160,6 +164,7 @@ return static function (Router $r): void {
     $r->post('/v1/merchant/subscription/pay', [MoneyController::class, 'paySubscription'], $merchant);
     $r->post('/v1/merchant/subscription/verify', [MoneyController::class, 'verifySubscription'], $merchant);
     $r->post('/v1/merchant/credit-requests', [MoneyController::class, 'requestCredit'], $merchant);
+    $r->post('/v1/merchant/credit-offer', [MoneyController::class, 'answerCreditOffer'], $merchant);
     $r->put('/v1/merchant/data-sharing', [MoneyController::class, 'dataSharing'], $merchant);
 
     // Tâche planifiée appelée par URL (hébergement sans SSH) : /v1/internal/cron?key=<cron_key>

@@ -36,9 +36,13 @@ final class Reports
         }
         $tabs .= '</nav>';
         $body = $tabs . Html::table(['Reçu le', 'Profil signalé', 'Motif', 'Signalé par', 'Décision'], array_map(static function (array $r) use ($status): array {
-            $decision = $status !== 'open' ? View::badge($status === 'blocked' ? 'Bloqué' : 'Classé', $status === 'blocked' ? 'danger' : 'muted')
-                : '<details><summary class="btn sm danger">Bloquer l\'accès</summary>' . Clients::blockForm('/pro/signalements/' . $r['id'] . '/bloquer') . '</details>'
-                  . View::action('/pro/signalements/' . $r['id'] . '/classer', 'Classer', [], 'Le signalement sera classé sans suite. Le compte reste actif.', 'btn ghost sm');
+            $decision = $status === 'blocked'
+                ? ($r['target_status'] === 'suspended'
+                    ? View::badge('Bloqué', 'danger') . ' ' . View::action('/pro/signalements/' . $r['id'] . '/debloquer', 'Débloquer', [], 'Cette personne pourra de nouveau utiliser Axi. Elle est prévenue par email et dans l\'application.', 'btn ok sm')
+                    : View::badge('Déjà débloqué', 'ok'))
+                : ($status === 'dismissed' ? View::badge('Classé') : '<div class="actions">'
+                  . ($r['target_status'] === 'active' ? Clients::blockPopup('/pro/signalements/' . $r['id'] . '/bloquer', $r['target']) : '')
+                  . View::action('/pro/signalements/' . $r['id'] . '/classer', 'Classer', [], 'Le signalement sera classé sans suite. Le compte reste actif.', 'btn ghost sm') . '</div>');
             return [
                 View::date($r['created_at']),
                 '<a href="' . View::url('/pro/clients/' . $r['target_user_id']) . '"><strong>' . View::e($r['target']) . '</strong></a><br><span class="muted small">'
@@ -49,7 +53,13 @@ final class Reports
                 $decision,
             ];
         }, $rows), $status === 'open' ? 'Aucun signalement à examiner.' : 'Aucun signalement.');
-        Html::page('Signalements', $body, 'Profils signalés par les clients et les commerçants depuis l\'application.');
+        // Annonces signalées : ouverture directe pour les corriger
+        $ads = Database::all("SELECT c.id, c.title, o.name AS org, COUNT(*) AS n, MAX(r.created_at) AS last_at FROM campaign_reports r JOIN campaigns c ON c.id = r.campaign_id JOIN organizations o ON o.id = c.organization_id WHERE r.status = 'open' GROUP BY c.id, c.title, o.name ORDER BY last_at DESC");
+        $adsHtml = $ads === [] ? '' : '<h2>Annonces signalées (' . count($ads) . ')</h2>' . Html::table(['Annonce', 'Annonceur', '#Signalements', 'Dernier le', ''], array_map(static fn (array $a): array => [
+            '<strong>' . View::e($a['title']) . '</strong>', View::e($a['org']), (string) $a['n'], View::date($a['last_at']),
+            '<a class="btn sm" href="' . View::url('/pro/campagnes/' . $a['id'] . '/modifier') . '">Voir et modifier</a>',
+        ], $ads));
+        Html::page('Signalements', $adsHtml . '<h2>Profils signalés</h2>' . $body, 'Annonces et profils signalés par les clients et les commerçants depuis l\'application.');
     }
 
     public function block(Request $req): never
@@ -65,6 +75,20 @@ final class Reports
         // Tous les signalements ouverts sur ce compte sont traités
         Database::run("UPDATE reports SET status = 'blocked', handled_by = ?, handled_at = ? WHERE target_user_id = ? AND status = 'open'", [$agent['id'], Clock::now(), $r['target_user_id']]);
         View::redirect('/pro/signalements', 'Accès bloqué : la personne est déconnectée et voit le motif si elle essaie de se connecter.');
+    }
+
+    /** Lever le blocage : accès rendu, personne prévenue, signalements classés (ils restent visibles dans « Classés ») */
+    public function unblock(Request $req): never
+    {
+        $agent = WebAuth::require(['axi']);
+        WebAuth::checkCsrf();
+        $r = $this->find((int) ($req->params['id'] ?? 0));
+        if (Database::value('SELECT status FROM users WHERE id = ?', [$r['target_user_id']]) !== 'suspended') {
+            View::redirect('/pro/signalements?status=blocked', 'Ce compte n\'est plus bloqué.', 'err');
+        }
+        Clients::applyStatus($req, $agent, (int) $r['target_user_id'], 'active');
+        Database::run("UPDATE reports SET status = 'dismissed', handled_by = ?, handled_at = ? WHERE target_user_id = ? AND status = 'blocked'", [$agent['id'], Clock::now(), $r['target_user_id']]);
+        View::redirect('/pro/signalements?status=blocked', 'Accès débloqué : la personne a été prévenue.');
     }
 
     public function dismiss(Request $req): never

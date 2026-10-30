@@ -41,6 +41,13 @@ final class AccountController
             'data_cap_mb' => 'int|min:100|maxval:20000',
         ], ['data_cap_mb' => 'Plafond de données', 'preferred_payment_phone' => 'Téléphone de paiement', 'default_address' => 'Adresse']);
 
+        // Mes achats et paiements : disparition automatique après 3, 6 ou 12 mois (0 = jamais)
+        if (array_key_exists('history_months', $body)) {
+            if (!in_array($body['history_months'], [0, 3, 6, 12], true)) {
+                Validator::fail(['history_months' => 'Durée non proposée.']);
+            }
+            $in['history_months'] = $body['history_months'];
+        }
         if (isset($in['preferred_point_id'])) {
             $pointId = Ids::tryDecode('pt', $in['preferred_point_id']);
             if ($pointId === null || Database::value('SELECT id FROM axi_points WHERE id = ? AND active = 1', [$pointId]) === null) {
@@ -243,7 +250,7 @@ final class AccountController
                 'UPDATE users SET first_name = \'Compte\', last_name = \'supprimé\', name = \'Compte supprimé\', email = ?, phone = NULL, password_hash = ?, status = \'deleted\', deleted_at = ? WHERE id = ?',
                 ['supprime-' . $userId . '@deleted.invalid', password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT), Clock::now(), $userId],
             );
-            foreach (['user_settings', 'favorites', 'product_views', 'stall_follows', 'notifications', 'push_tokens'] as $table) {
+            foreach (['user_settings', 'favorites', 'product_views', 'stall_follows', 'notifications', 'push_tokens', 'sales_hidden'] as $table) {
                 Database::run("DELETE FROM $table WHERE user_id = ?", [$userId]);
             }
             Database::run('UPDATE data_sharing_consents SET revoked_at = ? WHERE merchant_user_id = ? AND revoked_at IS NULL', [Clock::now(), $userId]);
@@ -396,6 +403,7 @@ final class AccountController
             'lang' => Database::value('SELECT lang FROM users WHERE id = ?', [$userId]),
             'currency' => $s['currency'],
             'date_format' => $s['date_format'],
+            'history_months' => (int) $s['history_months'],
             'notifications' => Notifier::preferences($userId),
             'default_address' => $s['default_address'],
             'preferred_point_id' => Ids::encode('pt', $s['preferred_point_id']),

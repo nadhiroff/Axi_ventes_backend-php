@@ -38,7 +38,7 @@ final class CatalogController
         Response::ok([
             'city' => ['id' => 'cotonou', 'name' => Settings::text('city_name')],
             'market_notice' => Settings::bool('anagem_partnership') ? ['text' => 'Service en ligne des marchés', 'partner' => 'ANaGeM'] : null,
-            'sponsored' => $this->sponsored(),
+            'ads' => \Axi\Services\Ads::online('clients'),
             'aisles' => Stalls::aisles(),
             'followed_stalls' => array_map([Stalls::class, 'summary'], $followed),
             'featured_stalls' => $this->featuredStalls(),
@@ -206,37 +206,6 @@ final class CatalogController
      * Campagne « Promotion sur l'accueil client » validée par Axi et en cours (une par jour, pour garder
      * l'ETag stable), sinon null. Aucune publicité n'est affichée sur la page d'un étal.
      */
-    private function sponsored(): ?array
-    {
-        $now = Clock::now();
-        $c = Database::one(
-            'SELECT * FROM campaigns WHERE format IN (\'sponsored_home\', \'sponsored_aisle\') AND status = \'active\'
-               AND (starts_at IS NULL OR starts_at <= ?) AND (ends_at IS NULL OR ends_at > ?)
-             ORDER BY MD5(CONCAT(id, CURDATE())) LIMIT 1',
-            [$now, $now],
-        );
-        if ($c === null) {
-            return null;
-        }
-        $target = match (true) {
-            $c['target_stall_id'] !== null => ['type' => 'stall', 'id' => Ids::encode('stl', $c['target_stall_id'])],
-            $c['aisle_id'] !== null => ['type' => 'aisle', 'id' => $c['aisle_id']],
-            default => null,
-        };
-        if ($target === null) {
-            return null;
-        }
-        Database::run('UPDATE campaigns SET impressions = impressions + 1 WHERE id = ?', [$c['id']]);
-        return [
-            'id' => Ids::encode('spn', $c['id']),
-            'label' => 'Sponsorisé',
-            'title' => $c['title'],
-            'text' => $c['body'],
-            'image' => Stalls::image($c['image_path'], 600, 300),
-            'target' => $target,
-        ];
-    }
-
     /** Étals mis en avant par une campagne validée (« featured_stall ») */
     private function featuredStalls(): array
     {
@@ -255,6 +224,40 @@ final class CatalogController
         $id = $req->id('spn');
         Database::run('UPDATE campaigns SET clicks = clicks + 1 WHERE id = ? AND status = \'active\'', [$id]);
         Response::ok(['counted' => true]);
+    }
+
+    /** Annonce vue à l'écran (une fois par ouverture de l'application) */
+    public function promotionView(Request $req): never
+    {
+        Database::run('UPDATE campaigns SET impressions = impressions + 1 WHERE id = ? AND status = \'active\'', [$req->id('spn')]);
+        Response::ok(['counted' => true]);
+    }
+
+    /** Signaler une annonce : { reason } ; une fois par personne et par annonce */
+    public function promotionReport(Request $req): never
+    {
+        $id = $req->id('spn');
+        $reason = (string) ($req->all()['reason'] ?? '');
+        if (!isset(\Axi\Services\Ads::REPORT_REASONS[$reason])) {
+            Validator::fail(['reason' => 'Motif inconnu.']);
+        }
+        Database::run('INSERT IGNORE INTO campaign_reports (campaign_id, user_id, reason, created_at) SELECT id, ?, ?, ? FROM campaigns WHERE id = ?', [$req->userId(), $reason, Clock::now(), $id]);
+        Response::ok(['message' => 'Merci, l\'équipe Axi va vérifier cette annonce.']);
+    }
+
+    /**
+     * Interrogé par l'application toutes les 10 s (304 sans corps si rien n'a changé) : quand l'équipe Axi change
+     * ce que tout le monde voit (annonces, réglages, allées, marchés, étaux), l'écran affiché se met à jour seul.
+     */
+    public function live(Request $req): never
+    {
+        $market = Database::one(
+            "SELECT (SELECT MAX(updated_at) FROM settings) AS settings,
+                    (SELECT SUM(CRC32(CONCAT_WS(':', id, name, active))) FROM aisles) AS aisles,
+                    (SELECT SUM(CRC32(CONCAT_WS(':', id, name, active))) FROM sites) AS sites,
+                    (SELECT CONCAT(COUNT(*), ':', SUM(status = 'active')) FROM stalls) AS stalls",
+        );
+        Response::ok(['v' => md5(\Axi\Services\Ads::fingerprint() . '|' . implode('|', $market))]);
     }
 
     /** Taux de change pour afficher les prix en euro ou en dollar (paiement toujours en F CFA) */

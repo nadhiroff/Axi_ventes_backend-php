@@ -403,6 +403,9 @@ final class Escrow
         if ($amount <= 0) {
             throw new HttpException(409, 'NOTHING_TO_PAY', 'Aucune somme libérée à verser à ce commerçant.');
         }
+        // Crédit en cours avec retenue acceptée par le commerçant : la part convenue rembourse son crédit
+        $withheld = \Axi\Services\Credit::withholding((int) $stall['user_id'], $amount);
+        $amount -= $withheld;
         $gateway = Gateways::get();
         $payoutId = Database::insert(
             'INSERT INTO payouts (stall_id, amount, phone, provider, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)',
@@ -412,7 +415,11 @@ final class Escrow
         Database::run('UPDATE payouts SET status = ?, provider_ref = ?, processed_at = ? WHERE id = ?', [$result['status'], $result['provider_ref'], Clock::now(), $payoutId]);
         if ($result['status'] !== 'failed') {
             Database::run('UPDATE order_stalls SET payout_id = ? WHERE id IN (' . Database::in($parts) . ')', [$payoutId, ...array_column($parts, 'id')]);
-            Notifier::send((int) $stall['user_id'], 'payment', 'Versement de vos ventes', self::fcfa($amount) . ' vous ont été versés' . ($result['status'] === 'simulated' ? ' (simulation, mode test)' : '') . '.', ['payout_id' => $payoutId]);
+            if ($withheld > 0) {
+                $creditId = (int) Database::value('SELECT id FROM credits WHERE merchant_user_id = ? AND status = \'granted\' AND withhold_pct > 0 ORDER BY id LIMIT 1', [$stall['user_id']]);
+                \Axi\Services\Credit::repay($creditId, $withheld, 'payout', $payoutId, $agentId);
+            }
+            Notifier::send((int) $stall['user_id'], 'payment', 'Versement de vos ventes', self::fcfa($amount) . ' vous ont été versés' . ($withheld > 0 ? ' (' . self::fcfa($withheld) . ' retenus pour votre crédit)' : '') . ($result['status'] === 'simulated' ? ' (simulation, mode test)' : '') . '.', ['payout_id' => $payoutId]);
         }
         self::log('payout_' . $result['status'], [], 'partner', $agentId, 'released', 'paid_out', $result['provider_ref'], $amount, ['stall_id' => $stallId, 'payout_id' => $payoutId]);
         return ['id' => $payoutId, 'amount' => $amount] + $result;

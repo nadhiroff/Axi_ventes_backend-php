@@ -71,7 +71,7 @@ final class Merchants
             View::e($s['merchant_type'] === 'wholesale' ? 'Grossiste' : 'Détaillant'),
             $s['verified_at'] !== null ? View::badge('Vérifié', 'ok') : View::badge('À vérifier', 'warn'),
             $s['sub_end'] !== null && $s['sub_end'] >= Clock::localDate() ? View::badge('Jusqu\'au ' . date('d/m/Y', strtotime($s['sub_end'])), 'ok') : View::badge('Inactif'),
-            $s['user_status'] === 'active' && $s['status'] === 'active' ? View::badge('Actif', 'ok') : View::badge('Suspendu', 'danger'),
+            $s['user_status'] === 'active' && $s['status'] === 'active' ? View::badge('Actif', 'ok') : View::badge('Suspendu', 'danger') . ' ' . View::action('/pro/commercants/' . $s['id'] . '/activer', 'Débloquer', ['back' => 'list'], 'Réactiver ce commerçant et son étal ? Il est prévenu par email et dans l\'application.', 'btn ok sm'),
         ], array_slice($rows, 0, self::PER_PAGE)), 'Aucun commerçant ne correspond.')
             . View::pager('/pro/commercants', array_intersect_key($_GET, array_flip(['q', 'site_id', 'aisle_id', 'state'])), $page, $more);
         Html::page('Commerçants', $body, 'Recensement, vérification sur place et gestion des étals.');
@@ -307,13 +307,10 @@ final class Merchants
         $agent = WebAuth::require(['axi']);
         WebAuth::checkCsrf();
         $s = $this->stall((int) ($req->params['id'] ?? 0));
-        Database::run('UPDATE users SET status = ? WHERE id = ?', [$status, $s['user_id']]);
-        Database::run('UPDATE stalls SET status = ? WHERE id = ?', [$status, $s['id']]);
-        if ($status === 'suspended') {
-            \Axi\Core\Auth::revokeAll((int) $s['user_id']);
-        }
+        // Même chemin que partout ailleurs : compte, étal, déconnexion et personne prévenue
+        Clients::applyStatus($req, $agent, (int) $s['user_id'], $status, $status === 'suspended' ? 'Compte suspendu par l\'équipe Axi.' : '');
         $this->log($req, $agent, 'merchant.' . ($status === 'active' ? 'activate' : 'suspend'), (int) $s['id']);
-        View::redirect('/pro/commercants/' . $s['id'], $status === 'active' ? 'Commerçant réactivé.' : 'Commerçant suspendu : son étal n\'est plus visible.');
+        View::redirect(($_POST['back'] ?? '') === 'list' ? '/pro/commercants?state=suspended' : '/pro/commercants/' . $s['id'], $status === 'active' ? 'Commerçant réactivé.' : 'Commerçant suspendu : son étal n\'est plus visible.');
     }
 
     private function stall(int $id): array

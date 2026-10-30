@@ -36,7 +36,7 @@ final class Notifier
 
     /**
      * @param array $email [paragraphes, extra] pour EmailTemplates::message, ou [] pour le texte seul
-     * @param bool $forceEmail email envoyé même si l'utilisateur l'a désactivé (sécurité du compte)
+     * @param bool $forceEmail message important (sécurité, refus d'une demande, crédit) : envoyé par email ET dans l'application, même si l'utilisateur les a désactivés
      * @return array{app: bool, email: bool} ce qui a réellement été envoyé
      */
     public static function send(int $userId, string $type, string $title, string $body, array $data = [], array $email = [], bool $forceEmail = false): array
@@ -47,7 +47,7 @@ final class Notifier
         }
         $prefs = self::preferences($userId)[$type];
         $sent = ['app' => false, 'email' => false];
-        if ($prefs['app']) {
+        if ($prefs['app'] || $forceEmail) {
             Database::run(
                 'INSERT INTO notifications (user_id, type, title, body, data, created_at) VALUES (?, ?, ?, ?, ?, ?)',
                 [$userId, $type, mb_substr($title, 0, 160), mb_substr($body, 0, 600), $data === [] ? null : json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), Clock::now()],
