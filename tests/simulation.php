@@ -528,6 +528,12 @@ call('POST', "/v1/conversations/$conv/messages/" . ($m['id'] ?? 'msg_0') . '/hid
 $clientSees = array_column(call('GET', "/v1/conversations/$conv/messages", null, $client)['body']['data']['messages'] ?? [], 'id');
 $merchantSees = array_column(call('GET', "/v1/conversations/$conv/messages", null, $second)['body']['data']['messages'] ?? [], 'id');
 check('message supprimé « pour moi » : disparu chez moi, toujours là chez l\'autre', !in_array($m['id'] ?? '', $clientSees, true) && in_array($m['id'] ?? '', $merchantSees, true));
+call('DELETE', "/v1/conversations/$conv", null, $client);
+check('discussion supprimée pour moi : absente de ma liste, toujours chez l\'autre', !in_array($conv, array_column(call('GET', '/v1/conversations', null, $client)['body']['data']['conversations'] ?? [], 'id'), true)
+    && in_array($conv, array_column(call('GET', '/v1/conversations', null, $second)['body']['data']['conversations'] ?? [], 'id'), true));
+call('POST', "/v1/conversations/$conv/messages", ['body' => 'Encore là ?'], $second);
+$again = call('GET', "/v1/conversations/$conv/messages", null, $client)['body']['data']['messages'] ?? [];
+check('nouveau message : la discussion revient, avec ce message seulement', count($again) === 1 && $again[0]['body'] === 'Encore là ?', json_encode($again));
 $r = call('POST', '/v1/merchant/arrivals', ['text' => 'Arrivage de riz parfumé ce matin !', 'photo' => new CURLFile($photo, 'image/webp')], $second, [], true);
 check('annonce d\'arrivage écrite sans abonnement : sur la page de l\'étal seulement', $r['status'] === 200 && count(call('GET', "/v1/stalls/stl_$secondStall")['body']['data']['stall']['announcements'] ?? []) === 1
     && !in_array("stl_$secondStall", array_column(array_column(call('GET', '/v1/home')['body']['data']['announcements'] ?? [], 'stall'), 'id'), true), $r['raw']);

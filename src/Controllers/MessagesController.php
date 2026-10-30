@@ -43,7 +43,8 @@ final class MessagesController
         );
         $out = [];
         foreach ($rows as $c) {
-            $last = Database::one('SELECT m.* FROM messages m WHERE m.conversation_id = ? AND ' . Messaging::VISIBLE . self::NOT_HIDDEN . ' ORDER BY m.id DESC LIMIT 1', [$c['id'], $me]);
+            $cleared = (int) ((int) $c['client_id'] === $me ? $c['client_cleared_msg_id'] : $c['merchant_cleared_msg_id']);
+            $last = Database::one('SELECT m.* FROM messages m WHERE m.conversation_id = ? AND m.id > ? AND ' . Messaging::VISIBLE . self::NOT_HIDDEN . ' ORDER BY m.id DESC LIMIT 1', [$c['id'], $cleared, $me]);
             if ($last === null) {
                 continue; // tout a expiré
             }
@@ -80,6 +81,8 @@ final class MessagesController
     {
         $c = $this->participant($req);
         $after = Ids::tryDecode('msg', (string) $req->query('after', '')) ?? 0;
+        // Discussion supprimée pour moi : seuls les messages arrivés depuis sont affichés
+        $after = max($after, (int) ((int) $c['client_id'] === $req->userId() ? $c['client_cleared_msg_id'] : $c['merchant_cleared_msg_id']));
         $rows = Database::all(
             'SELECT * FROM (SELECT m.* FROM messages m WHERE m.conversation_id = ? AND m.id > ? AND ' . Messaging::VISIBLE . self::NOT_HIDDEN . ' ORDER BY m.id DESC LIMIT 200) x ORDER BY id',
             [$c['id'], $after, $req->userId()],
@@ -159,6 +162,19 @@ final class MessagesController
         Response::ok($this->message(Database::one('SELECT * FROM messages WHERE id = ?', [$m['id']]), $req->userId(), Database::one('SELECT * FROM conversations WHERE id = ?', [$c['id']])));
     }
 
+    /**
+     * Supprimer la discussion « pour moi » : elle disparaît de ma liste et ses messages de mon écran ;
+     * l'autre personne la garde. Si un nouveau message arrive, la discussion réapparaît (avec lui seul).
+     */
+    public function clear(Request $req): never
+    {
+        $c = $this->participant($req);
+        $side = (int) $c['client_id'] === $req->userId() ? 'client' : 'merchant';
+        $max = (int) Database::value('SELECT COALESCE(MAX(id), 0) FROM messages WHERE conversation_id = ?', [$c['id']]);
+        Database::run("UPDATE conversations SET {$side}_cleared_msg_id = ?, {$side}_read_msg_id = GREATEST({$side}_read_msg_id, ?), {$side}_read_at = ? WHERE id = ?", [$max, $max, Clock::now(), $c['id']]);
+        Response::ok(['cleared' => true]);
+    }
+
     /** Supprimer un message « pour moi » (le mien ou celui de l'autre) : il reste chez l'autre personne */
     public function hide(Request $req): never
     {
@@ -209,8 +225,8 @@ final class MessagesController
         $unread = (int) Database::value(
             'SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id
              WHERE ' . Messaging::VISIBLE . self::NOT_HIDDEN . ' AND m.sender_id <> ?
-               AND ((c.client_id = ? AND (c.client_read_at IS NULL OR m.created_at > c.client_read_at))
-                 OR (c.stall_id = ? AND (c.merchant_read_at IS NULL OR m.created_at > c.merchant_read_at)))',
+               AND ((c.client_id = ? AND m.id > c.client_cleared_msg_id AND (c.client_read_at IS NULL OR m.created_at > c.client_read_at))
+                 OR (c.stall_id = ? AND m.id > c.merchant_cleared_msg_id AND (c.merchant_read_at IS NULL OR m.created_at > c.merchant_read_at)))',
             [$me, $me, $me, $stallId],
         );
         $user = Database::one('SELECT role, merchant_welcome_pending FROM users WHERE id = ?', [$me]);
@@ -272,9 +288,10 @@ final class MessagesController
         $asClient = (int) $c['client_id'] === $me;
         $kept = Messaging::follows((int) $c['client_id'], (int) $c['stall_id']);
         $readAt = $asClient ? $c['client_read_at'] : $c['merchant_read_at'];
+        $cleared = (int) ($asClient ? ($c['client_cleared_msg_id'] ?? 0) : ($c['merchant_cleared_msg_id'] ?? 0));
         $unread = (int) Database::value(
-            'SELECT COUNT(*) FROM messages m WHERE m.conversation_id = ? AND m.sender_id <> ? AND ' . Messaging::VISIBLE . self::NOT_HIDDEN . ($readAt !== null ? ' AND m.created_at > ?' : ''),
-            $readAt !== null ? [$c['id'], $me, $me, $readAt] : [$c['id'], $me, $me],
+            'SELECT COUNT(*) FROM messages m WHERE m.conversation_id = ? AND m.id > ? AND m.sender_id <> ? AND ' . Messaging::VISIBLE . self::NOT_HIDDEN . ($readAt !== null ? ' AND m.created_at > ?' : ''),
+            $readAt !== null ? [$c['id'], $cleared, $me, $me, $readAt] : [$c['id'], $cleared, $me, $me],
         );
         $stallImage = Stalls::image($c['photo_path'], $c['photo_width'] === null ? null : (int) $c['photo_width'], $c['photo_height'] === null ? null : (int) $c['photo_height']);
         $merchant = $asClient ? null : Users::find((int) $c['merchant_id']);

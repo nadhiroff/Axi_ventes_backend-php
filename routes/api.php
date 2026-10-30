@@ -70,6 +70,7 @@ return static function (Router $r): void {
     $r->patch('/v1/conversations/{id}/messages/{message}', [MessagesController::class, 'edit'], $user);
     $r->delete('/v1/conversations/{id}/messages/{message}', [MessagesController::class, 'delete'], $user);
     $r->post('/v1/conversations/{id}/read', [MessagesController::class, 'read'], $user);
+    $r->delete('/v1/conversations/{id}', [MessagesController::class, 'clear'], $user);
     $r->post('/v1/conversations/{id}/messages/{message}/hide', [MessagesController::class, 'hide'], $user);
     $r->get('/v1/users/{id}/profile', [ProfileController::class, 'show'], $user);
     $r->post('/v1/users/{id}/report', [ProfileController::class, 'report'], $user);
