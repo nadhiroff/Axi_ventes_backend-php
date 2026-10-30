@@ -145,7 +145,7 @@ final class Merchants
             'has_physical_place' => ['A une place physique', 'checkbox', (bool) $s['has_physical_place'], null],
             'phone' => ['Téléphone', 'text', $s['phone'] ?? '', null],
             'whatsapp' => ['WhatsApp', 'text', $s['whatsapp'] ?? '', null],
-        ], 'Enregistrer', 'Enregistrer les modifications de cet étal ?') . '</div>';
+        ], 'Mettre à jour', 'Les informations de cet étal seront mises à jour.') . '</div>';
 
         $amount = Settings::subscriptionAmount($s['merchant_type']);
         $sub = '<div class="card"><h2>Abonnement</h2>'
