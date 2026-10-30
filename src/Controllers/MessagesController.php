@@ -318,6 +318,12 @@ final class MessagesController
                 'kind' => $last['kind'],
                 'preview' => $last['deleted_at'] !== null ? '🚫 Message supprimé' : match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', default => mb_substr((string) $last['body'], 0, 80) },
                 'mine' => (int) $last['sender_id'] === $me,
+                // Coches visibles dans la liste : ✓ envoyé, ✓✓ reçu, ✓✓ bleu vu (mes messages seulement)
+                'status' => (int) $last['sender_id'] !== $me ? null : match (true) {
+                    (int) $c[($asClient ? 'merchant' : 'client') . '_read_msg_id'] >= (int) $last['id'] => 'read',
+                    (int) $c[($asClient ? 'merchant' : 'client') . '_delivered_msg_id'] >= (int) $last['id'] => 'delivered',
+                    default => 'sent',
+                },
                 'created_at' => Clock::iso($last['created_at']),
             ],
         ];
