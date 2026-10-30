@@ -60,6 +60,7 @@ final class TodayController
             'orders_to_prepare' => count(array_filter($orders, static fn (array $o): bool => $o['status'] === 'to_prepare')),
             'connection' => ['active' => $active, 'included_until' => $subscription['ends_on'] ?? null],
             'relocation' => $this->relocation($stall),
+            'ads' => \Axi\Services\Ads::online('merchants'),
             'orders' => $orders,
         ], 200, 60);
     }

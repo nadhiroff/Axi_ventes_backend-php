@@ -160,8 +160,16 @@ final class OrderController
 
     public function index(Request $req): never
     {
-        $rows = Database::all('SELECT id FROM orders WHERE client_id = ? ORDER BY id DESC LIMIT 100', [$req->userId()]);
-        Response::ok(['orders' => array_map(fn (array $o): array => $this->present((int) $o['id'], false), $rows)]);
+        // Mêmes règles que Mes achats et paiements : cachées à la main ou après le délai choisi, si elles sont terminées
+        $finished = SalesController::FINISHED['buyer'];
+        $months = (int) Database::value('SELECT history_months FROM user_settings WHERE user_id = ?', [$req->userId()]);
+        $rows = Database::all(
+            "SELECT o.id, $finished AS hideable FROM orders o WHERE o.client_id = ?
+             AND NOT ($finished AND (EXISTS (SELECT 1 FROM sales_hidden h WHERE h.user_id = o.client_id AND h.order_id = o.id AND h.side = 'buyer')" . ($months > 0 ? ' OR o.created_at < ?' : '') . '))
+             ORDER BY o.id DESC LIMIT 100',
+            [$req->userId(), ...($months > 0 ? [Clock::now(-30 * 86400 * $months)] : [])],
+        );
+        Response::ok(['orders' => array_map(fn (array $o): array => $this->present((int) $o['id'], false) + ['hideable' => (bool) $o['hideable']], $rows)]);
     }
 
     public function show(Request $req): never

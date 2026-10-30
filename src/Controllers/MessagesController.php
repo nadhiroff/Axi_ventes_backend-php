@@ -72,6 +72,9 @@ final class MessagesController
         $clientRow = $req->id('cli', 'CLIENT_NOT_FOUND', 'Client introuvable.');
         $row = Database::one('SELECT user_id, display_name FROM merchant_clients WHERE id = ? AND stall_id = ?', [$clientRow, $stallId]);
         $userId = $row['user_id'] ?? null;
+        if ($userId !== null && Database::value('SELECT status FROM users WHERE id = ?', [$userId]) !== 'active') {
+            throw new HttpException(403, 'ACCOUNT_UNAVAILABLE', 'Ce compte n\'est plus disponible.');
+        }
         if ($userId === null) {
             throw new HttpException(422, 'CLIENT_WITHOUT_ACCOUNT', 'Ce client n\'a pas de compte Axi : écrivez-lui par WhatsApp ou appelez-le.');
         }
@@ -105,6 +108,10 @@ final class MessagesController
     {
         $c = $this->participant($req);
         $me = $req->userId();
+        // Compte bloqué en face : plus aucun message, comme un compte banni
+        if (Database::value('SELECT status FROM users WHERE id = ?', [(int) $c['client_id'] === $me ? $c['merchant_id'] : $c['client_id']]) !== 'active') {
+            throw new HttpException(403, 'ACCOUNT_UNAVAILABLE', 'Ce compte n\'est plus disponible.');
+        }
         // Discussion seulement entre un étal et un client qui le suit ou a accepté d'être son client
         if (!Messaging::linked((int) $c['client_id'], (int) $c['stall_id'])) {
             throw new HttpException(403, (int) $c['client_id'] === $me ? 'FOLLOW_REQUIRED' : 'INVITE_PENDING', (int) $c['client_id'] === $me
@@ -281,16 +288,19 @@ final class MessagesController
         if ($stallId > 0) {
             Database::run("UPDATE conversations c SET c.merchant_delivered_at = ?, c.merchant_delivered_msg_id = $max WHERE c.stall_id = ? AND c.last_message_at IS NOT NULL AND (c.merchant_delivered_at IS NULL OR c.merchant_delivered_at <= c.last_message_at)", [$now, $stallId]);
         }
-        $unread = (int) Database::value(
-            'SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id
-             WHERE ' . Messaging::VISIBLE . self::NOT_HIDDEN . ' AND m.sender_id <> ?
-               AND ((c.client_id = ? AND m.id > c.client_cleared_msg_id AND (c.client_read_at IS NULL OR m.created_at > c.client_read_at))
-                 OR (c.stall_id = ? AND m.id > c.merchant_cleared_msg_id AND (c.merchant_read_at IS NULL OR m.created_at > c.merchant_read_at)))',
-            [$me, $me, $me, $stallId],
+        // Comptés à part : les discussions où je suis client et celles de mon commerce ne se mélangent pas
+        $unread = Database::one(
+            'SELECT COALESCE(SUM(c.client_id = ? AND m.id > c.client_cleared_msg_id AND (c.client_read_at IS NULL OR m.created_at > c.client_read_at)), 0) AS client,
+                    COALESCE(SUM(c.stall_id = ? AND m.id > c.merchant_cleared_msg_id AND (c.merchant_read_at IS NULL OR m.created_at > c.merchant_read_at)), 0) AS merchant
+             FROM messages m JOIN conversations c ON c.id = m.conversation_id
+             WHERE ' . Messaging::VISIBLE . self::NOT_HIDDEN . ' AND m.sender_id <> ?',
+            [$me, $stallId, $me, $me],
         );
         $user = Database::one('SELECT role, merchant_welcome_pending FROM users WHERE id = ?', [$me]);
         Response::ok([
-            'unread_messages' => $unread,
+            'unread_messages' => (int) $unread['client'] + (int) $unread['merchant'],
+            'unread_as_client' => (int) $unread['client'],
+            'unread_as_merchant' => (int) $unread['merchant'],
             'unread_notifications' => (int) Database::value('SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read_at IS NULL', [$me]),
             // L'application recharge le profil quand le rôle change (demande commerçant acceptée)
             'role' => $user['role'],
@@ -355,7 +365,15 @@ final class MessagesController
         );
         $stallImage = Stalls::image($c['photo_path'], $c['photo_width'] === null ? null : (int) $c['photo_width'], $c['photo_height'] === null ? null : (int) $c['photo_height']);
         $merchant = $asClient ? null : Users::find((int) $c['merchant_id']);
-        $otherSeen = Database::value('SELECT last_seen_at FROM users WHERE id = ?', [$asClient ? $c['merchant_id'] : $c['client_id']]);
+        $otherUser = Database::one('SELECT status, last_seen_at FROM users WHERE id = ?', [$asClient ? $c['merchant_id'] : $c['client_id']]);
+        // Compte bloqué : ni nom, ni photo, ni présence, ni réponse possible. Rien n'est effacé : tout revient au déblocage.
+        $gone = ($otherUser['status'] ?? '') !== 'active';
+        $otherSeen = $gone ? null : ($otherUser['last_seen_at'] ?? null);
+        if ($gone) {
+            $stallImage = null;
+            $c['client_name'] = $c['stall_name'] = 'Compte indisponible';
+            $c['avatar_path'] = null;
+        }
         return [
             'id' => Ids::encode('conv', $c['id']),
             'my_role' => $asClient ? 'client' : 'merchant',
@@ -373,9 +391,10 @@ final class MessagesController
             // Durée des messages (réglée par le commerçant) : 24 h, 48 h ; 30 ou 90 jours s'il est abonné
             'retention_hours' => $hours,
             // Écrire : le client suit l'étal ou a accepté l'invitation du commerçant (dans les deux sens)
-            'can_write' => Messaging::linked((int) $c['client_id'], (int) $c['stall_id']),
+            'other_unavailable' => $gone,
+            'can_write' => !$gone && Messaging::linked((int) $c['client_id'], (int) $c['stall_id']),
             'retention_note' => 'Les messages disparaissent ' . Messaging::label($hours) . ' après leur envoi.',
-            'retention_options' => $asClient ? null : array_map(
+            'retention_options' => $asClient || $gone ? null : array_map(
                 static fn (int $h, bool $pro): array => ['hours' => $h, 'label' => Messaging::label($h), 'locked' => $pro && !$subscribed],
                 array_keys(Messaging::RETENTION),
                 array_values(Messaging::RETENTION),
