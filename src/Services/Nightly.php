@@ -52,7 +52,7 @@ final class Nightly
         );
         foreach ($rows as $o) {
             Database::run('UPDATE orders SET reminder_sent_at = ? WHERE id = ?', [Clock::now(), $o['id']]);
-            Notifier::send((int) $o['client_id'], 'reminder', 'Votre commande attend son paiement', 'La commande cmd_' . $o['id'] . ' (' . Escrow::fcfa((int) $o['total']) . ') n\'est pas encore payée. Ouvrez « Mes commandes » pour la payer ou l\'annuler.', ['order_id' => 'cmd_' . $o['id']]);
+            Notifier::send((int) $o['client_id'], 'reminder', 'Votre commande attend son paiement', 'La commande n° ' . $o['id'] . ' (' . Escrow::fcfa((int) $o['total']) . ') n\'est pas encore payée. Ouvrez « Mes commandes » pour la payer ou l\'annuler.', ['order_id' => 'cmd_' . $o['id']]);
         }
         return count($rows);
     }

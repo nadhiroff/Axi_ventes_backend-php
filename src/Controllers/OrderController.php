@@ -226,7 +226,7 @@ final class OrderController
         $in = Validator::validate($req->all(), ['reason' => 'required|string|max:1000', 'stall_id' => 'string'], ['reason' => 'Motif', 'stall_id' => 'Étal']);
         $stallId = isset($in['stall_id']) ? Ids::decode('stl', $in['stall_id'], 'STALL_NOT_FOUND', 'Cet étal ne fait pas partie de la commande.') : null;
         Escrow::openDispute($id, $req->userId(), $in['reason'], $stallId);
-        Notifier::send($req->userId(), 'order', 'Litige enregistré', 'Votre signalement pour la commande cmd_' . $id . ' est transmis à l\'équipe Axi. L\'argent reste bloqué jusqu\'à sa décision.', ['order_id' => 'cmd_' . $id]);
+        Notifier::send($req->userId(), 'order', 'Litige enregistré', 'Votre signalement pour la commande n° ' . $id . ' est transmis à l\'équipe Axi. L\'argent reste bloqué jusqu\'à sa décision.', ['order_id' => 'cmd_' . $id]);
         Response::ok($this->present($id, false));
     }
 
@@ -442,7 +442,7 @@ final class OrderController
         } else {
             $rows[] = ['Total à payer', Escrow::fcfa((int) $order['total'])];
         }
-        Notifier::send((int) $order['client_id'], 'order', 'Commande cmd_' . $orderId . ' enregistrée', 'Votre commande est enregistrée. Payez-la en Mobile Money pour que vos commerçants la préparent.', ['order_id' => 'cmd_' . $orderId], [
+        Notifier::send((int) $order['client_id'], 'order', 'Commande n° ' . $orderId . ' enregistrée', 'Votre commande est enregistrée. Payez-la en Mobile Money pour que vos commerçants la préparent.', ['order_id' => 'cmd_' . $orderId], [
             ['Votre commande est enregistrée. Payez-la une seule fois en Mobile Money : l\'argent reste chez Axi jusqu\'à ce que vous confirmiez la réception.'],
             ['rows' => $rows],
         ]);

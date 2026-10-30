@@ -7,26 +7,35 @@ use Axi\Core\HttpException;
 use Axi\Core\Request;
 use Axi\Services\SignedUrl;
 
-/** Écoute d'un fichier audio privé (storage/audio) par lien signé et temporaire */
+/** Écoute d'un vocal ou lecture d'une vidéo privés (storage/audio, storage/video) par lien signé et temporaire */
 final class MediaController
 {
     public function audio(Request $req): never
     {
-        $path = (string) SignedUrl::verify('/v1/media/audio', $req->queryAll())['p'];
+        $this->stream((string) SignedUrl::verify('/v1/media/audio', $req->queryAll())['p'], 'audio', 'audio/mp4');
+    }
+
+    public function video(Request $req): never
+    {
+        $this->stream((string) SignedUrl::verify('/v1/media/video', $req->queryAll())['p'], 'video', 'video/mp4');
+    }
+
+    private function stream(string $path, string $folder, string $type): never
+    {
         $file = realpath(BASE_PATH . '/storage/' . $path);
-        $root = realpath(BASE_PATH . '/storage/audio');
+        $root = realpath(BASE_PATH . '/storage/' . $folder);
         if ($file === false || $root === false || !str_starts_with($file, $root . DIRECTORY_SEPARATOR) || !is_file($file)) {
-            throw new HttpException(404, 'NOT_FOUND', 'Enregistrement introuvable.');
+            throw new HttpException(404, 'NOT_FOUND', 'Fichier introuvable.');
         }
         // Pas de compression gzip : la longueur annoncée doit être celle du fichier
         while (ob_get_level() > 0) {
             ob_end_clean();
         }
-        // Le lecteur audio de l'iPhone (AVPlayer) lit par morceaux : sans réponse 206 aux requêtes Range, il refuse de lire
+        // Le lecteur de l'iPhone (AVPlayer, audio et vidéo) lit par morceaux : sans réponse 206 aux requêtes Range, il refuse de lire
         $size = (int) filesize($file);
         $start = 0;
         $end = $size - 1;
-        header('Content-Type: audio/mp4');
+        header('Content-Type: ' . $type);
         header('Accept-Ranges: bytes');
         header('Cache-Control: private, max-age=86400');
         if (preg_match('/^bytes=(\d*)-(\d*)$/', (string) ($_SERVER['HTTP_RANGE'] ?? ''), $m)) {

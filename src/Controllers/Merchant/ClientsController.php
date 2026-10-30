@@ -12,6 +12,8 @@ use Axi\Core\Request;
 use Axi\Core\Response;
 use Axi\Core\Validator;
 use Axi\Services\Broadcaster;
+use Axi\Services\Notifier;
+use Axi\Services\Messaging;
 use Axi\Services\Settings;
 use Axi\Services\Uploads;
 use Axi\Support\Merchant;
@@ -24,6 +26,13 @@ use Axi\Support\Stalls;
  */
 final class ClientsController
 {
+    /** Dernier client ajouté, par étal (seul à pouvoir porter « Nouveau ») */
+    private array $newestId = [];
+    /** Liste : comptes et abonnés lus en 2 requêtes pour tous les clients (au lieu de 2 par client) */
+    private ?array $users = null;
+    private ?array $followers = null;
+    private ?string $followUpBefore = null;
+
     private const LABELS = ['display_name' => 'Nom', 'phone' => 'Téléphone', 'email' => 'Email', 'kind' => 'Type de client', 'segment' => 'Clients', 'note' => 'Note'];
 
     public function index(Request $req): never
@@ -41,6 +50,22 @@ final class ClientsController
             array_push($params, $like, $like, $like);
         }
         $rows = Database::all("SELECT * FROM merchant_clients WHERE stall_id = ? AND $where ORDER BY COALESCE(last_order_at, created_at) DESC LIMIT 500", [$stall['id'], ...$params]);
+        // Comme WhatsApp : dernier message échangé avec chaque client, et le plus récent en haut
+        $last = $this->lastMessages((int) $stall['id']);
+        $activity = static fn (array $c): string => max($c['created_at'], $c['last_order_at'] ?? '', $c['user_id'] !== null ? ($last[(int) $c['user_id']]['created_at'] ?? '') : '');
+        usort($rows, static fn (array $a, array $b): int => strcmp($activity($b), $activity($a)));
+        $userIds = array_values(array_unique(array_filter(array_map(static fn (array $c): ?int => $c['user_id'] === null ? null : (int) $c['user_id'], $rows))));
+        $this->users = [];
+        $this->followers = [];
+        if ($userIds !== []) {
+            foreach (Database::all('SELECT id, avatar_path, avatar_visibility, status FROM users WHERE id IN (' . Database::in($userIds) . ')', $userIds) as $u) {
+                $this->users[(int) $u['id']] = $u;
+            }
+            foreach (Database::all('SELECT user_id FROM stall_follows WHERE stall_id = ? AND user_id IN (' . Database::in($userIds) . ')', [$stall['id'], ...$userIds]) as $f) {
+                $this->followers[(int) $f['user_id']] = true;
+            }
+        }
+
         $followers = (int) Database::value('SELECT COUNT(*) FROM stall_follows WHERE stall_id = ?', [$stall['id']]);
 
         [$loyalWhere, $loyalParams] = $this->segmentSql('loyal');
@@ -53,22 +78,23 @@ final class ClientsController
                 'button_label' => 'Envoyer à mes clients fidèles',
             ] : null,
             'followers_count' => $followers,
-            'clients' => array_map([$this, 'present'], $rows),
+            'clients' => array_map(fn (array $c): array => $this->present($c, $c['user_id'] !== null ? ($last[(int) $c['user_id']] ?? null) : null), $rows),
         ], 200, 60);
     }
 
-    /** Fiche client : coordonnées, note, historique de ses commandes chez ce commerçant */
+    private const ORDER_LABELS = ['to_prepare' => 'À préparer', 'ready' => 'Prête', 'picked_up' => 'Remise au coursier', 'delivered' => 'Livrée', 'cancelled' => 'Annulée'];
+
+    /** Fiche client : coordonnées, note, historique de ses commandes chez ce commerçant (les plus récentes en premier) */
     public function show(Request $req): never
     {
         $stall = Merchant::stall($req);
         $client = $this->find($req, (int) $stall['id']);
         $orders = $client['user_id'] === null ? [] : Database::all(
             'SELECT o.id, o.created_at, os.items_total, os.status, os.escrow_state FROM order_stalls os JOIN orders o ON o.id = os.order_id
-             WHERE os.stall_id = ? AND o.client_id = ? AND o.status <> \'awaiting_payment\' ORDER BY o.id DESC LIMIT 100',
+             WHERE os.stall_id = ? AND o.client_id = ? AND o.status <> \'awaiting_payment\' ORDER BY o.created_at DESC, o.id DESC LIMIT 100',
             [$stall['id'], $client['user_id']],
         );
         Response::ok($this->present($client) + [
-            'email' => $client['email'],
             'kind' => $client['kind'],
             'note' => $client['note'],
             'orders_count' => (int) $client['orders_count'],
@@ -82,6 +108,7 @@ final class ClientsController
                     'amount' => (int) $o['items_total'],
                     'summary' => implode(', ', array_map(static fn (array $i): string => $i['quantity'] . ' × ' . $i['name'], $items)),
                     'status' => $o['status'],
+                    'status_label' => self::ORDER_LABELS[$o['status']] ?? $o['status'],
                     'escrow_state' => $o['escrow_state'],
                 ];
             }, $orders),
@@ -171,10 +198,15 @@ final class ClientsController
         }
         // Type détecté : un commerçant inscrit sur Axi qui achète chez vous est un revendeur
         $kind = $in['kind'] ?? (($user['role'] ?? null) === 'merchant' ? 'reseller' : 'individual');
+        // Compte Axi trouvé : invitation à accepter (pas de discussion avant) ; suivre l'étal vaut accord
+        $pending = $userId !== null && !Messaging::follows($userId, (int) $stall['id']);
         $id = Database::insert(
-            'INSERT INTO merchant_clients (stall_id, user_id, display_name, phone, email, kind, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [$stall['id'], $userId, $name, $in['phone'] ?? null, $in['email'] ?? ($user['email'] ?? null), $kind, $in['note'] ?? null, Clock::now()],
+            'INSERT INTO merchant_clients (stall_id, user_id, invite_status, invited_at, display_name, phone, email, kind, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [$stall['id'], $userId, $pending ? 'pending' : 'accepted', $userId !== null ? Clock::now() : null, $name, $in['phone'] ?? null, $in['email'] ?? ($user['email'] ?? null), $kind, $in['note'] ?? null, Clock::now()],
         );
+        if ($pending) {
+            Notifier::send($userId, 'account', $stall['name'] . ' veut vous ajouter à ses clients', 'Acceptez pour pouvoir discuter avec ce commerçant et recevoir ses nouveautés. Ouvrez vos notifications pour répondre.', ['client_invite' => Ids::encode('cli', $id), 'stall_id' => Ids::encode('stl', $stall['id'])]);
+        }
         Response::ok($this->present(Database::one('SELECT * FROM merchant_clients WHERE id = ?', [$id])), 201);
     }
 
@@ -420,15 +452,17 @@ final class ClientsController
         };
     }
 
-    private function present(array $c): array
+    private function present(array $c, ?array $last = null): array
     {
-        $user = $c['user_id'] === null ? null : Database::one('SELECT id, avatar_path, avatar_visibility, status FROM users WHERE id = ?', [$c['user_id']]);
-        $follows = $c['user_id'] !== null && Database::value('SELECT 1 FROM stall_follows WHERE user_id = ? AND stall_id = ?', [$c['user_id'], $c['stall_id']]) !== null;
-        $followUpBefore = Clock::now(-86400 * Settings::int('follow_up_days'));
-        $newAfter = Clock::now(-86400 * 7);
+        $uid = $c['user_id'] === null ? null : (int) $c['user_id'];
+        $user = $uid === null ? null : ($this->users !== null ? ($this->users[$uid] ?? null) : Database::one('SELECT id, avatar_path, avatar_visibility, status FROM users WHERE id = ?', [$uid]));
+        $follows = $uid !== null && ($this->followers !== null ? isset($this->followers[$uid]) : Database::value('SELECT 1 FROM stall_follows WHERE user_id = ? AND stall_id = ?', [$uid, $c['stall_id']]) !== null);
+        $followUpBefore = $this->followUpBefore ??= Clock::now(-86400 * Settings::int('follow_up_days'));
+        $newAfter = Clock::now(-3600);
         $badge = match (true) {
             $c['last_order_at'] !== null && $c['last_order_at'] < $followUpBefore => ['kind' => 'follow_up', 'label' => 'Relancer'],
-            (int) $c['orders_count'] <= 1 && max($c['created_at'], $c['last_order_at'] ?? '') >= $newAfter => ['kind' => 'new', 'label' => 'Nouveau'],
+            // « Nouveau » : le dernier client ajouté, pendant une heure seulement
+            (int) $c['id'] === $this->newestOf((int) $c['stall_id']) && $c['created_at'] >= $newAfter => ['kind' => 'new', 'label' => 'Nouveau'],
             (int) $c['orders_count'] >= Settings::int('loyal_min_orders') => ['kind' => 'loyal', 'label' => 'Fidèle'],
             $follows && (int) $c['orders_count'] === 0 => ['kind' => 'follower', 'label' => 'Abonné'],
             default => null,
@@ -440,13 +474,44 @@ final class ClientsController
             'display_name' => $c['display_name'],
             'description' => "$kind · $when",
             'phone' => $c['phone'],
-            'email' => $c['email'],
+            // Email jamais renvoyé au commerçant : seul le nom s'affiche (la relance par email passe par le serveur)
             'badge' => $badge,
             // Compte Axi : profil (présentation) et discussion directe dans l'application
             'user_id' => $user === null || $user['status'] !== 'active' ? null : Ids::encode('usr', $user['id']),
             'avatar' => $user === null ? null : \Axi\Support\Users::avatarFor($user + ['avatar_path' => $user['avatar_path']], null, true),
             'follows' => $follows,
+            // Ajouté à la main : accepted, pending (en attente de sa réponse) ou declined (refusé)
+            'invite_status' => $c['invite_status'] ?? 'accepted',
+            'last_message' => $last === null ? null : [
+                'preview' => $last['deleted_at'] !== null ? '🚫 Message supprimé' : match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', 'video' => '🎥 Vidéo', default => mb_substr((string) $last['body'], 0, 80) },
+                'mine' => (int) $last['sender_id'] !== (int) $c['user_id'],
+                'created_at' => Clock::iso($last['created_at']),
+            ],
         ];
+    }
+
+    /** Liste ET fiche du client : « Nouveau » disparaît au bout d'une heure, ou dès qu'un autre client est ajouté */
+    private function newestOf(int $stallId): int
+    {
+        return $this->newestId[$stallId] ??= (int) Database::value('SELECT MAX(id) FROM merchant_clients WHERE stall_id = ?', [$stallId]);
+    }
+
+    /** Dernier message visible de chaque discussion de l'étal (hors messages effacés « pour moi » par le commerçant), par client */
+    private function lastMessages(int $stallId): array
+    {
+        $rows = Database::all(
+            'SELECT c.client_id, m.kind, m.body, m.sender_id, m.created_at, m.deleted_at FROM conversations c
+             JOIN messages m ON m.id = (
+               SELECT MAX(m2.id) FROM messages m2 WHERE m2.conversation_id = c.id AND m2.id > COALESCE(c.merchant_cleared_msg_id, 0)
+               AND (m2.expires_at IS NULL OR m2.expires_at > UTC_TIMESTAMP()))
+             WHERE c.stall_id = ?',
+            [$stallId],
+        );
+        $map = [];
+        foreach ($rows as $r) {
+            $map[(int) $r['client_id']] = $r;
+        }
+        return $map;
     }
 
     /** « aujourd'hui », « hier », « il y a 5 jours », « il y a 6 semaines », « il y a 3 mois » (heure du Bénin) */

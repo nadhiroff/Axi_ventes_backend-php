@@ -8,6 +8,7 @@ declare(strict_types=1);
 // Chaque lancement crée de nouveaux comptes (adresses @example.com, aucun email réel).
 
 use Axi\Core\Database;
+use Axi\Services\Settings;
 use Axi\Services\Payment\FakeGateway;
 
 require dirname(__DIR__) . '/src/bootstrap.php';
@@ -455,9 +456,11 @@ check('frais payés : part du commerçant « espèces », rien de bloqué chez A
 $r = call('POST', "/v1/orders/$cashId/confirm-receipt", null, $client);
 check('réception confirmée : commande livrée, aucun versement dû', ($r['body']['data']['status'] ?? '') === 'delivered' && Database::value('SELECT escrow_state FROM order_stalls WHERE order_id = ?', [id($cashId)]) === 'cash', $r['raw']);
 
-section('7d. Messagerie client ↔ commerçant (24 h, gardée si le client suit l\'étal)');
+section('7d. Messagerie client ↔ commerçant (24 h par défaut, le client suit l\'étal pour écrire)');
 $secondStall = id((string) (call('GET', '/v1/me', null, $second)['body']['data']['merchant']['stall_id'] ?? 'stl_0'));
 $conv = (string) (call('POST', "/v1/stalls/stl_$secondStall/conversation", null, $client)['body']['data']['conversation']['id'] ?? '');
+check('sans suivre l\'étal, le client ne peut pas écrire (403)', call('POST', "/v1/conversations/$conv/messages", ['body' => 'Bonjour'], $client)['status'] === 403);
+call('POST', "/v1/stalls/stl_$secondStall/follow", null, $client);
 $r = call('POST', "/v1/conversations/$conv/messages", ['body' => 'Bonjour, le riz est-il disponible ?'], $client);
 check('le client écrit au commerçant : message enregistré, effacé dans 24 h', $r['status'] === 201 && Database::value('SELECT expires_at FROM messages WHERE id = ?', [id($r['body']['data']['id'])]) !== null, $r['raw']);
 check('pastille : 1 message non lu chez le commerçant', (call('GET', '/v1/me/badges', null, $second)['body']['data']['unread_messages'] ?? 0) === 1);
@@ -471,7 +474,7 @@ check('photo envoyée dans la conversation', ($r['body']['data']['image']['mediu
 $r = call('POST', "/v1/conversations/$conv/messages", ['audio' => new CURLFile(__DIR__ . '/fixtures/voix.m4a', 'audio/mp4', 'voix.m4a')], $client, [], true);
 check('message vocal envoyé (lien d\'écoute signé)', str_contains((string) ($r['body']['data']['audio_url'] ?? ''), 'sig='), $r['raw']);
 $msgs = call('GET', "/v1/conversations/$conv/messages", null, $client)['body']['data'] ?? [];
-check('le client voit les 4 messages et la règle des 24 h', count($msgs['messages'] ?? []) === 4 && $msgs['conversation']['kept'] === false, json_encode($msgs['conversation'] ?? []));
+check('le client voit les 4 messages et la règle des 24 h', count($msgs['messages'] ?? []) === 4 && ($msgs['conversation']['retention_hours'] ?? 0) === 24 && $msgs['conversation']['retention_options'] === null, json_encode($msgs['conversation'] ?? []));
 $mine = array_values(array_filter($msgs['messages'], static fn ($m) => $m['mine']));
 check('mes messages : ✓✓ bleu (lu) quand le commerçant a ouvert la conversation', ($mine[0]['status'] ?? '') === 'read', json_encode($mine[0] ?? []));
 check('le commerçant est « en ligne » (application ouverte)', ($msgs['conversation']['other_online'] ?? false) === true);
@@ -492,10 +495,8 @@ $msgs = call('GET', "/v1/conversations/$conv/messages", null, $client)['body']['
 $last = end($msgs['messages']);
 check('« après » un message : seulement les nouveaux (rafraîchissement léger)', count(call('GET', "/v1/conversations/$conv/messages?after=" . $last['id'], null, $client)['body']['data']['messages'] ?? [1]) === 0);
 check('un tiers ne peut pas lire la conversation (404)', call('GET', "/v1/conversations/$conv/messages", null, $merchant)['status'] === 404);
-call('POST', "/v1/stalls/stl_$secondStall/follow", null, $client);
-check('le client suit l\'étal : messages gardés', (int) Database::value('SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.id = ? AND m.expires_at IS NOT NULL', [id($conv)]) === 0);
-call('DELETE', "/v1/stalls/stl_$secondStall/follow", null, $client);
-check('il ne suit plus : effacement programmé dans 24 h', (int) Database::value('SELECT COUNT(*) FROM messages m WHERE m.conversation_id = ? AND m.expires_at IS NULL', [id($conv)]) === 0);
+check('suivre l\'étal ne change plus la durée : effacement toujours programmé', (int) Database::value('SELECT COUNT(*) FROM messages m WHERE m.conversation_id = ? AND m.expires_at IS NULL', [id($conv)]) === 0);
+check('seul le commerçant règle la durée des messages (403 pour le client)', call('PATCH', "/v1/conversations/$conv/settings", ['retention_hours' => 48], $client)['status'] === 403);
 Database::run('UPDATE messages SET expires_at = ? WHERE conversation_id = ?', [\Axi\Core\Clock::now(-60), id($conv)]);
 check('après 24 h : messages invisibles puis effacés par la tâche planifiée', count(call('GET', "/v1/conversations/$conv/messages", null, $client)['body']['data']['messages'] ?? [1]) === 0
     && \Axi\Services\Messaging::purgeExpired() >= 6 && (int) Database::value('SELECT COUNT(*) FROM messages WHERE conversation_id = ?', [id($conv)]) === 0);
@@ -578,7 +579,10 @@ check('consentement retiré : dossier refusé à l\'IMF (403)', call('GET', "/pr
 check('l\'IMF n\'accède pas aux commerçants (403)', call('GET', '/pro/commercants', null, null, [], false, true)['status'] === 403);
 webLogin('anagem@example.com', 'Partenaire-2026!');
 check('ANaGeM : recensement agrégé, pas de fiche commerçant', call('GET', '/pro/recensement', null, null, [], false, true)['status'] === 200 && call('GET', "/pro/commercants/$stallId", null, null, [], false, true)['status'] === 403);
-check('aucune statistique sur moins de 5 étals', !str_contains(call('GET', '/pro/recensement', null, null, [], false, true)['raw'], 'Par site'));
+// Le résultat dépend du nombre d'étals actifs déjà en base (les simulations successives en ajoutent)
+$activeStalls = (int) Database::value("SELECT COUNT(*) FROM stalls s JOIN users u ON u.id = s.user_id WHERE s.status = 'active' AND u.status = 'active'");
+$census = call('GET', '/pro/recensement', null, null, [], false, true)['raw'];
+check('recensement : statistiques seulement à partir de ' . Settings::int('min_group_size') . ' étals', $activeStalls < Settings::int('min_group_size') ? !str_contains($census, 'Par site') : str_contains($census, 'Par site') && str_contains($census, 'regroupés'));
 $csrf = webLogin('annonceur@example.com', 'Partenaire-2026!');
 call('POST', '/pro/campagnes', ['_csrf' => $csrf, 'format' => 'sponsored_home', 'audience_type' => 'clients', 'aisle_id' => 'tissus', 'title' => "Promo sim $stamp", 'body' => 'Wax à prix doux', 'budget' => '60000'], null, [], false, true);
 $campaign = (int) Database::value('SELECT id FROM campaigns WHERE title = ?', ["Promo sim $stamp"]);

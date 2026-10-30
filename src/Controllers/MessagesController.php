@@ -11,6 +11,7 @@ use Axi\Core\Request;
 use Axi\Core\Response;
 use Axi\Core\Validator;
 use Axi\Services\Messaging;
+use Axi\Services\Push;
 use Axi\Services\SignedUrl;
 use Axi\Services\Uploads;
 use Axi\Support\Stalls;
@@ -69,9 +70,14 @@ final class MessagesController
     {
         $stallId = $this->ownStallId($req->userId()) ?? throw new HttpException(404, 'STALL_REQUIRED', 'Votre étal n\'existe pas encore.');
         $clientRow = $req->id('cli', 'CLIENT_NOT_FOUND', 'Client introuvable.');
-        $userId = Database::value('SELECT user_id FROM merchant_clients WHERE id = ? AND stall_id = ?', [$clientRow, $stallId]);
+        $row = Database::one('SELECT user_id, display_name FROM merchant_clients WHERE id = ? AND stall_id = ?', [$clientRow, $stallId]);
+        $userId = $row['user_id'] ?? null;
         if ($userId === null) {
             throw new HttpException(422, 'CLIENT_WITHOUT_ACCOUNT', 'Ce client n\'a pas de compte Axi : écrivez-lui par WhatsApp ou appelez-le.');
+        }
+        // Ajouté à la main : il doit d'abord accepter (ou suivre l'étal) avant toute discussion
+        if (!Messaging::linked((int) $userId, $stallId)) {
+            throw new HttpException(403, 'INVITE_PENDING', $row['display_name'] . ' n\'a pas encore accepté votre invitation. Vous pourrez discuter dès qu\'il accepte.');
         }
         Response::ok($this->conversation($this->findOrCreate($stallId, (int) $userId), $req->userId()));
     }
@@ -99,6 +105,12 @@ final class MessagesController
     {
         $c = $this->participant($req);
         $me = $req->userId();
+        // Discussion seulement entre un étal et un client qui le suit ou a accepté d'être son client
+        if (!Messaging::linked((int) $c['client_id'], (int) $c['stall_id'])) {
+            throw new HttpException(403, (int) $c['client_id'] === $me ? 'FOLLOW_REQUIRED' : 'INVITE_PENDING', (int) $c['client_id'] === $me
+                ? 'Suivez cet étal pour écrire au commerçant.'
+                : 'Ce client n\'a pas encore accepté votre invitation.');
+        }
         $recent = (int) Database::value('SELECT COUNT(*) FROM messages WHERE sender_id = ? AND created_at > ?', [$me, Clock::now(-60)]);
         if ($recent >= self::PER_MINUTE) {
             throw new HttpException(429, 'TOO_MANY_REQUESTS', 'Vous envoyez beaucoup de messages. Patientez une minute.', ['retry_after' => 60]);
@@ -120,6 +132,8 @@ final class MessagesController
             [$kind, $path, $width, $height] = ['photo', $saved['path'], $saved['width'], $saved['height']];
         } elseif (($audio = $req->file('audio')) !== null) {
             [$kind, $path] = ['voice', Uploads::audio($audio)];
+        } elseif (($video = $req->file('video')) !== null) {
+            [$kind, $path] = ['video', Uploads::video($video)];
         } elseif ($body === '') {
             Validator::fail(['body' => 'Écrivez un message.'], ['body' => 'Message']);
         }
@@ -127,13 +141,33 @@ final class MessagesController
         $id = Database::transaction(function () use ($c, $me, $kind, $body, $path, $width, $height, $now, $replyTo): int {
             $id = Database::insert(
                 'INSERT INTO messages (conversation_id, sender_id, kind, body, file_path, file_width, file_height, reply_to_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                [$c['id'], $me, $kind, $body === '' ? null : $body, $path, $width, $height, $replyTo, $now, Messaging::expiresAt((int) $c['client_id'], (int) $c['stall_id'])],
+                [$c['id'], $me, $kind, $body === '' ? null : $body, $path, $width, $height, $replyTo, $now, Messaging::expiresAt($c)],
             );
             $mine = (int) $c['client_id'] === $me ? 'client_read_at' : 'merchant_read_at';
             Database::run("UPDATE conversations SET last_message_at = ?, $mine = ? WHERE id = ?", [$now, $now, $c['id']]);
             return $id;
         });
+        $this->pushMessage($c, $me, $kind, $body);
         Response::ok($this->message(Database::one('SELECT * FROM messages WHERE id = ?', [$id]), $me, Database::one('SELECT * FROM conversations WHERE id = ?', [$c['id']])), 201);
+    }
+
+    /** Alerte sur le téléphone du destinataire : « Nom » et le début du message (ou « Photo », « Message vocal ») */
+    private function pushMessage(array $c, int $me, string $kind, string $body): void
+    {
+        $stall = Database::one('SELECT user_id, name FROM stalls WHERE id = ?', [$c['stall_id']]);
+        if ($stall === null) {
+            return;
+        }
+        $fromClient = (int) $c['client_id'] === $me;
+        $to = $fromClient ? (int) $stall['user_id'] : (int) $c['client_id'];
+        $from = $fromClient ? (string) Database::value('SELECT name FROM users WHERE id = ?', [$me]) : (string) $stall['name'];
+        $text = match ($kind) {
+            'photo' => $body !== '' ? "📷 $body" : '📷 Photo',
+            'voice' => '🎤 Message vocal',
+            'video' => $body !== '' ? "🎥 $body" : '🎥 Vidéo',
+            default => $body,
+        };
+        Push::toUser($to, $from, $text, ['url' => '/messages/' . Ids::encode('conv', (int) $c['id'])]);
     }
 
     /** Modifier son propre message texte : { body } ; « modifié » est affiché à côté de l'heure */
@@ -155,11 +189,36 @@ final class MessagesController
     public function delete(Request $req): never
     {
         [$c, $m] = $this->ownMessage($req);
-        if ($m['kind'] === 'voice' && $m['file_path'] !== null) {
+        if (in_array($m['kind'], ['voice', 'video'], true) && $m['file_path'] !== null) {
             @unlink(BASE_PATH . '/storage/' . $m['file_path']);
         }
         Database::run('UPDATE messages SET body = NULL, file_path = NULL, deleted_at = ? WHERE id = ?', [Clock::now(), $m['id']]);
         Response::ok($this->message(Database::one('SELECT * FROM messages WHERE id = ?', [$m['id']]), $req->userId(), Database::one('SELECT * FROM conversations WHERE id = ?', [$c['id']])));
+    }
+
+    /** Réglages de la discussion (commerçant) : { retention_hours: 24 | 48 | 720 | 2160 } ; 30 et 90 jours réservés aux abonnés */
+    public function settings(Request $req): never
+    {
+        $c = $this->participant($req);
+        if ((int) $c['merchant_id'] !== $req->userId()) {
+            throw new HttpException(403, 'FORBIDDEN', 'Seul le commerçant règle la durée des messages.');
+        }
+        $hours = Validator::validate($req->all(), ['retention_hours' => 'required|int'], ['retention_hours' => 'Durée'])['retention_hours'];
+        $hours = (int) $hours;
+        if (!array_key_exists($hours, Messaging::RETENTION)) {
+            Validator::fail(['retention_hours' => 'Durée non proposée.']);
+        }
+        if (Messaging::RETENTION[$hours]) {
+            \Axi\Support\Subscription::require((int) $c['stall_id'], 'Garder les messages ' . Messaging::label($hours));
+        }
+        Messaging::setRetention((int) $c['id'], $hours);
+        $row = Database::one(
+            'SELECT c.*, s.name AS stall_name, s.photo_path, s.photo_width, s.photo_height, s.user_id AS merchant_id,
+                    u.id AS client_user_id, u.name AS client_name, u.avatar_path, u.avatar_visibility
+             FROM conversations c JOIN stalls s ON s.id = c.stall_id JOIN users u ON u.id = c.client_id WHERE c.id = ?',
+            [$c['id']],
+        );
+        Response::ok(['conversation' => $this->summary($row, $req->userId(), null)]);
     }
 
     /**
@@ -286,7 +345,8 @@ final class MessagesController
     private function summary(array $c, int $me, ?array $last): array
     {
         $asClient = (int) $c['client_id'] === $me;
-        $kept = Messaging::follows((int) $c['client_id'], (int) $c['stall_id']);
+        $hours = Messaging::effectiveHours($c);
+        $subscribed = \Axi\Support\Subscription::active((int) $c['stall_id']);
         $readAt = $asClient ? $c['client_read_at'] : $c['merchant_read_at'];
         $cleared = (int) ($asClient ? ($c['client_cleared_msg_id'] ?? 0) : ($c['merchant_cleared_msg_id'] ?? 0));
         $unread = (int) Database::value(
@@ -299,7 +359,8 @@ final class MessagesController
         return [
             'id' => Ids::encode('conv', $c['id']),
             'my_role' => $asClient ? 'client' : 'merchant',
-            'stall' => ['id' => Ids::encode('stl', $c['stall_id']), 'name' => $c['stall_name'], 'avatar' => $stallImage],
+            // subscribed : commerçant abonné (badge « Abonné » dans la discussion)
+            'stall' => ['id' => Ids::encode('stl', $c['stall_id']), 'name' => $c['stall_name'], 'avatar' => $stallImage, 'subscribed' => $subscribed],
             // L'autre personne : l'étal pour le client, le client pour le commerçant (photo selon son choix)
             // Profil de l'autre personne (présentation publique, sans email ni téléphone)
             'other_user_id' => Ids::encode('usr', $asClient ? $c['merchant_id'] : $c['client_user_id']),
@@ -309,14 +370,20 @@ final class MessagesController
             // « En ligne » : application ouverte il y a moins d'une minute ; sinon « vu à … »
             'other_online' => $otherSeen !== null && strtotime($otherSeen . ' UTC') > time() - 60,
             'other_last_seen_at' => Clock::iso($otherSeen),
-            'kept' => $kept,
-            'retention_note' => $kept
-                ? 'Messages gardés : ' . ($asClient ? 'vous suivez' : 'le client suit') . ' cet étal.'
-                : 'Les messages disparaissent ' . Messaging::ttlHours() . ' h après leur envoi' . ($asClient ? ', sauf si vous suivez l\'étal.' : ' (le client ne suit pas votre étal).'),
+            // Durée des messages (réglée par le commerçant) : 24 h, 48 h ; 30 ou 90 jours s'il est abonné
+            'retention_hours' => $hours,
+            // Écrire : le client suit l'étal ou a accepté l'invitation du commerçant (dans les deux sens)
+            'can_write' => Messaging::linked((int) $c['client_id'], (int) $c['stall_id']),
+            'retention_note' => 'Les messages disparaissent ' . Messaging::label($hours) . ' après leur envoi.',
+            'retention_options' => $asClient ? null : array_map(
+                static fn (int $h, bool $pro): array => ['hours' => $h, 'label' => Messaging::label($h), 'locked' => $pro && !$subscribed],
+                array_keys(Messaging::RETENTION),
+                array_values(Messaging::RETENTION),
+            ),
             'unread_count' => $unread,
             'last_message' => $last === null ? null : [
                 'kind' => $last['kind'],
-                'preview' => $last['deleted_at'] !== null ? '🚫 Message supprimé' : match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', default => mb_substr((string) $last['body'], 0, 80) },
+                'preview' => $last['deleted_at'] !== null ? '🚫 Message supprimé' : match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', 'video' => '🎥 Vidéo', default => mb_substr((string) $last['body'], 0, 80) },
                 'mine' => (int) $last['sender_id'] === $me,
                 // Coches visibles dans la liste : ✓ envoyé, ✓✓ reçu, ✓✓ bleu vu (mes messages seulement)
                 'status' => (int) $last['sender_id'] !== $me ? null : match (true) {
@@ -347,7 +414,7 @@ final class MessagesController
             'id' => Ids::encode('msg', $r['id']),
             'mine' => (int) $r['sender_id'] === $me,
             'kind' => $r['kind'],
-            'preview' => $r['deleted_at'] !== null ? 'Message supprimé' : match ($r['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', default => mb_substr((string) $r['body'], 0, 120) },
+            'preview' => $r['deleted_at'] !== null ? 'Message supprimé' : match ($r['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', 'video' => '🎥 Vidéo', default => mb_substr((string) $r['body'], 0, 120) },
         ];
     }
 
@@ -373,6 +440,7 @@ final class MessagesController
             'body' => $m['body'],
             'image' => $deleted ? null : ($m['kind'] === 'photo' ? Stalls::image($m['file_path'], $m['file_width'] === null ? null : (int) $m['file_width'], $m['file_height'] === null ? null : (int) $m['file_height']) : null),
             'audio_url' => !$deleted && $m['kind'] === 'voice' ? SignedUrl::make('/v1/media/audio', ['p' => $m['file_path']], 86400) : null,
+            'video_url' => !$deleted && $m['kind'] === 'video' ? SignedUrl::make('/v1/media/video', ['p' => $m['file_path']], 86400) : null,
             'created_at' => Clock::iso($m['created_at']),
             'expires_at' => Clock::iso($m['expires_at']),
         ];

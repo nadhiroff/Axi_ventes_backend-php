@@ -175,7 +175,7 @@ final class Merchants
         ], $products), 'Aucun produit.');
 
         $ordersHtml = Html::title('Dernières commandes') . Html::table(['Commande', 'Date', 'Client', '#Montant', 'Séquestre'], array_map(static fn (array $o): array => [
-            '<a href="' . View::url('/pro/commandes/' . $o['order_id']) . '">cmd_' . (int) $o['order_id'] . '</a>', View::date($o['created_at']), View::e($o['client']), View::fcfa($o['items_total']), Orders::escrowBadge($o['escrow_state']),
+            '<a href="' . View::url('/pro/commandes/' . $o['order_id']) . '">n° ' . (int) $o['order_id'] . '</a>', View::date($o['created_at']), View::e($o['client']), View::fcfa($o['items_total']), Orders::escrowBadge($o['escrow_state']),
         ], $orders), 'Aucune commande.');
 
         Html::page($s['name'], $money . '<div class="row2">' . $info . $verify . '</div><div class="row2">' . $edit . $sub . '</div>' . $productsHtml . $ordersHtml, 'Fiche commerçant');

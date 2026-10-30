@@ -68,10 +68,10 @@ final class Orders
             $params,
         );
         $body = Html::filters('/pro/commandes', [
-            'q' => ['Recherche (client, cmd_…, référence passerelle)', 'search', null],
+            'q' => ['Recherche (client, n° de commande, référence passerelle)', 'search', null],
             'status' => ['Statut', 'select', ['' => 'Tous'] + Escrow::ORDER_LABELS],
         ]) . Html::table(['Commande', 'Date', 'Client', 'Étals', '#Total', 'Statut', 'Paiement'], array_map(static fn (array $o): array => [
-            '<a href="' . View::url('/pro/commandes/' . $o['id']) . '"><strong>cmd_' . (int) $o['id'] . '</strong></a>',
+            '<a href="' . View::url('/pro/commandes/' . $o['id']) . '"><strong>n° ' . (int) $o['id'] . '</strong></a>',
             View::date($o['created_at']), View::e($o['client']), View::e($o['stalls']), View::fcfa($o['total']), self::orderBadge($o['status']),
             View::e(($o['provider'] ?? '—') . ' · ' . ($o['pay_status'] ?? '')) . '<br><span class="muted">' . View::e($o['provider_ref'] ?? '') . '</span>',
         ], array_slice($rows, 0, self::PER_PAGE)), 'Aucune commande.')
@@ -152,7 +152,7 @@ final class Orders
                 View::date($e['created_at']), View::e($e['event']), View::e($e['actor_type'] . ($e['actor_id'] ? ' #' . $e['actor_id'] : '')),
                 View::e(($e['old_state'] ?? '∅') . ' → ' . ($e['new_state'] ?? '∅')), View::e($e['gateway_ref'] ?? ''), $e['amount'] === null ? '' : View::fcfa($e['amount']),
             ], $events));
-        Html::page('Commande cmd_' . $id, $body);
+        Html::page('Commande n° ' . $id, $body);
     }
 
     public function pickup(Request $req): never
@@ -209,7 +209,7 @@ final class Orders
         );
         Html::page('Litiges', Html::filters('/pro/litiges', ['status' => ['Afficher', 'select', ['open' => 'Litiges ouverts', 'all' => 'Tous']]])
             . Html::table(['Date', 'Commande', 'Client', '#Montant', 'Motif', 'Statut'], array_map(static fn (array $d): array => [
-                View::date($d['created_at']), '<a class="btn ghost" href="' . View::url('/pro/commandes/' . $d['order_id']) . '">cmd_' . (int) $d['order_id'] . '</a>',
+                View::date($d['created_at']), '<a class="btn ghost" href="' . View::url('/pro/commandes/' . $d['order_id']) . '">n° ' . (int) $d['order_id'] . '</a>',
                 View::e($d['client']), View::fcfa($d['total']), View::e(mb_strimwidth($d['reason'], 0, 120, '…')),
                 View::badge(['open' => 'Ouvert', 'resolved_refund' => 'Remboursé', 'resolved_release' => 'Commerçants payés', 'rejected' => 'Rejeté'][$d['status']], $d['status'] === 'open' ? 'danger' : 'muted'),
             ], $rows), 'Aucun litige ouvert.'), 'L\'argent reste bloqué tant que le litige n\'est pas tranché.');

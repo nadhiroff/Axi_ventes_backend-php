@@ -53,6 +53,8 @@ final class Notifier
                 [$userId, $type, mb_substr($title, 0, 160), mb_substr($body, 0, 600), $data === [] ? null : json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), Clock::now()],
             );
             $sent['app'] = true;
+            // Même alerte sur le téléphone (bannière du système), avec l'écran à ouvrir
+            Push::toUser($userId, $title, $body, $data + ['url' => isset($data['order_id']) ? '/commande/' . $data['order_id'] : '/notifications']);
         }
         if ($prefs['email'] || $forceEmail) {
             [$subject, $html, $text] = EmailTemplates::message($title, (string) $user['first_name'], $email[0] ?? [$body], $email[1] ?? []);
