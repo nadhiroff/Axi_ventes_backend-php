@@ -1,10 +1,17 @@
+# Secrets (config.local.php) : jamais versionnés
+/.env
+/config/config.local.php.bak
 /config/config.local.php
+/storage/audio/
 /storage/logs/*
 !/storage/logs/.gitkeep
-/public/uploads/images/*
-!/public/uploads/images/.gitkeep
-/public/uploads/audio/*
-!/public/uploads/audio/.gitkeep
+/public/uploads/*
+!/public/uploads/.htaccess
 .DS_Store
 .idea/
 .vscode/
+/database/premier_partenaire.sql
+
+# Dépendances versionnées : l'hébergement n'a pas de SSH pour lancer composer install
+!/vendor/
+/storage/private/

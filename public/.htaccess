@@ -3,6 +3,8 @@ RewriteEngine On
 
 # Apache supprime souvent l'en-tête Authorization : on le transmet à PHP.
 RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+# Signale à PHP que la réécriture d'adresse fonctionne (liens courts /pro/connexion)
+RewriteRule .* - [E=AXI_REWRITE:1]
 
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteRule ^ index.php [QSA,L]
