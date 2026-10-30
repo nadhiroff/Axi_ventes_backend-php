@@ -23,6 +23,16 @@ final class Subscription
         'Connexion Internet incluse',
     ];
 
+    /** Annonces d'arrivage : durée maximale (jours) et nombre de photos, sans abonnement / abonné */
+    public const ANNOUNCEMENT_FREE = ['days' => 7, 'photos' => 2];
+    public const ANNOUNCEMENT_PRO = ['days' => 30, 'photos' => 5];
+
+    /** @return array{days: int, photos: int} */
+    public static function announcementLimits(int $stallId): array
+    {
+        return self::active($stallId) ? self::ANNOUNCEMENT_PRO : self::ANNOUNCEMENT_FREE;
+    }
+
     public static function current(int $stallId): ?array
     {
         return Database::one(
@@ -124,6 +134,8 @@ final class Subscription
                 'active_products' => (int) Database::value('SELECT COUNT(*) FROM products WHERE stall_id = ? AND status = \'active\'', [$stall['id']]),
                 'paused_products' => (int) Database::value('SELECT COUNT(*) FROM products WHERE stall_id = ? AND status = \'paused\'', [$stall['id']]),
                 'broadcasts' => $active,
+                'announcement_days' => ($active ? self::ANNOUNCEMENT_PRO : self::ANNOUNCEMENT_FREE)['days'],
+                'announcement_photos' => ($active ? self::ANNOUNCEMENT_PRO : self::ANNOUNCEMENT_FREE)['photos'],
                 'text' => $active ? null : sprintf(self::LIMITS_TEXT, $limit),
             ],
             'benefits' => self::BENEFITS,
