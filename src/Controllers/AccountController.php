@@ -54,28 +54,35 @@ final class AccountController
                 $in[$key] = null;
             }
         }
-        if (isset($body['notifications'])) {
-            if (!is_array($body['notifications'])) {
-                Validator::fail(['notifications' => 'Format invalide.']);
-            }
-            $prefs = Notifier::preferences($req->userId());
-            foreach ($body['notifications'] as $type => $channels) {
-                if (!isset($prefs[$type]) || !is_array($channels)) {
-                    Validator::fail(['notifications' => "Type de notification inconnu : $type."]);
-                }
-                foreach (['app', 'email'] as $channel) {
-                    if (array_key_exists($channel, $channels)) {
-                        $prefs[$type][$channel] = (bool) $channels[$channel];
-                    }
-                }
-            }
-            $in['notifications'] = json_encode($prefs);
+        if (isset($body['notifications']) && !is_array($body['notifications'])) {
+            Validator::fail(['notifications' => 'Format invalide.']);
         }
         $this->ensureRow($req->userId());
-        if ($in !== []) {
-            $set = implode(', ', array_map(static fn (string $c): string => "$c = ?", array_keys($in)));
-            Database::run("UPDATE user_settings SET $set WHERE user_id = ?", [...array_values($in), $req->userId()]);
-        }
+        // Ligne verrouillée : deux cases cochées très vite (deux requêtes) ne s'écrasent pas l'une l'autre
+        Database::transaction(function () use ($body, $in, $req): void {
+            if (isset($body['notifications'])) {
+                Database::one('SELECT user_id FROM user_settings WHERE user_id = ? FOR UPDATE', [$req->userId()]);
+                $prefs = Notifier::preferences($req->userId());
+                foreach ($body['notifications'] as $type => $channels) {
+                    if (!isset($prefs[$type]) || !is_array($channels)) {
+                        Validator::fail(['notifications' => "Type de notification inconnu : $type."]);
+                    }
+                    foreach (['app', 'email'] as $channel) {
+                        if (array_key_exists($channel, $channels)) {
+                            if (!is_bool($channels[$channel])) {
+                                Validator::fail(['notifications' => 'Valeur oui ou non attendue.']);
+                            }
+                            $prefs[$type][$channel] = $channels[$channel];
+                        }
+                    }
+                }
+                $in['notifications'] = json_encode($prefs);
+            }
+            if ($in !== []) {
+                $set = implode(', ', array_map(static fn (string $c): string => "$c = ?", array_keys($in)));
+                Database::run("UPDATE user_settings SET $set WHERE user_id = ?", [...array_values($in), $req->userId()]);
+            }
+        });
         Response::ok($this->presentSettings($req->userId()));
     }
 
@@ -90,6 +97,30 @@ final class AccountController
             [$month, $bytes, $month, $req->userId()],
         );
         Response::ok($this->presentSettings($req->userId())['data']);
+    }
+
+    /** Jeton de notification du téléphone (Expo), lié à la session en cours : { token, platform } */
+    public function savePushToken(Request $req): never
+    {
+        $in = Validator::validate($req->all(), ['token' => 'required|string|max:255', 'platform' => 'required|in:ios,android,web'], ['token' => 'Jeton', 'platform' => 'Système']);
+        if (!preg_match('/^Expo(nent)?PushToken\[[A-Za-z0-9_-]+\]$/', $in['token'])) {
+            Validator::fail(['token' => 'Jeton de notification invalide.']);
+        }
+        $now = Clock::now();
+        Database::run(
+            'INSERT INTO push_tokens (user_id, auth_token_id, token, platform, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), auth_token_id = VALUES(auth_token_id), platform = VALUES(platform), updated_at = VALUES(updated_at)',
+            [$req->userId(), $req->tokenId, $in['token'], $in['platform'], $now, $now],
+        );
+        Response::ok(['saved' => true]);
+    }
+
+    /** Remise à zéro du compteur de données du mois (bouton dans Paramètres > Données) */
+    public function resetDataUsage(Request $req): never
+    {
+        $this->ensureRow($req->userId());
+        Database::run('UPDATE user_settings SET data_used_bytes = 0, data_month = ? WHERE user_id = ?', [gmdate('Y-m'), $req->userId()]);
+        Response::ok($this->presentSettings($req->userId()));
     }
 
     /** Appareils connectés (jetons actifs) */
@@ -212,7 +243,7 @@ final class AccountController
                 'UPDATE users SET first_name = \'Compte\', last_name = \'supprimé\', name = \'Compte supprimé\', email = ?, phone = NULL, password_hash = ?, status = \'deleted\', deleted_at = ? WHERE id = ?',
                 ['supprime-' . $userId . '@deleted.invalid', password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT), Clock::now(), $userId],
             );
-            foreach (['user_settings', 'favorites', 'product_views', 'stall_follows', 'notifications'] as $table) {
+            foreach (['user_settings', 'favorites', 'product_views', 'stall_follows', 'notifications', 'push_tokens'] as $table) {
                 Database::run("DELETE FROM $table WHERE user_id = ?", [$userId]);
             }
             Database::run('UPDATE data_sharing_consents SET revoked_at = ? WHERE merchant_user_id = ? AND revoked_at IS NULL', [Clock::now(), $userId]);
@@ -221,6 +252,47 @@ final class AccountController
         });
         Auth::revokeAll($userId);
         Response::ok(['deleted' => true]);
+    }
+
+    /** Invitations en attente : des commerçants veulent m'ajouter à leurs clients (j'accepte ou je refuse) */
+    public function clientInvites(Request $req): never
+    {
+        $rows = Database::all(
+            'SELECT id, stall_id, invited_at FROM merchant_clients WHERE user_id = ? AND invite_status = \'pending\' ORDER BY invited_at DESC',
+            [$req->userId()],
+        );
+        $out = [];
+        foreach ($rows as $r) {
+            // Étal présenté comme ailleurs (emplacement, badges) ; un étal fermé n'invite plus
+            $stall = Stalls::findActive((int) $r['stall_id']);
+            if ($stall !== null) {
+                $out[] = ['id' => Ids::encode('cli', $r['id']), 'stall' => Stalls::summary($stall), 'invited_at' => Clock::iso($r['invited_at'])];
+            }
+        }
+        Response::ok(['invites' => $out]);
+    }
+
+    /** Accepter (POST …/accept) ou refuser (POST …/decline) : accepter ouvre la discussion dans les deux sens */
+    public function answerClientInvite(Request $req): never
+    {
+        $id = $req->id('cli', 'INVITE_NOT_FOUND', 'Invitation introuvable.');
+        $answer = (string) ($req->params['answer'] ?? '');
+        if (!in_array($answer, ['accept', 'decline'], true)) {
+            throw new HttpException(404, 'NOT_FOUND', 'Action inconnue.');
+        }
+        $accept = $answer === 'accept';
+        $n = Database::run(
+            'UPDATE merchant_clients SET invite_status = ?, answered_at = ? WHERE id = ? AND user_id = ? AND invite_status = \'pending\'',
+            [$accept ? 'accepted' : 'declined', Clock::now(), $id, $req->userId()],
+        )->rowCount();
+        if ($n === 0) {
+            throw new HttpException(404, 'INVITE_NOT_FOUND', 'Invitation introuvable ou déjà traitée.');
+        }
+        $row = Database::one('SELECT mc.display_name, s.user_id, s.name FROM merchant_clients mc JOIN stalls s ON s.id = mc.stall_id WHERE mc.id = ?', [$id]);
+        if ($accept) {
+            Notifier::send((int) $row['user_id'], 'account', $row['display_name'] . ' a accepté votre invitation', 'Vous pouvez maintenant lui écrire depuis « Mes clients ».', ['client_id' => Ids::encode('cli', $id)]);
+        }
+        Response::ok(['status' => $accept ? 'accepted' : 'declined']);
     }
 
     public function notifications(Request $req): never

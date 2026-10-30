@@ -76,7 +76,7 @@ final class Clients
             . '</div>'
             . '</div><div class="card"><h2>Dernières connexions</h2>' . Html::table(['Date', 'Résultat', 'Appareil'], array_map(static fn (array $l): array => [View::date($l['created_at']), $l['success'] ? View::badge('Réussie', 'ok') : View::badge('Refusée', 'danger'), View::e($l['device'] ?? '')], $logins)) . '</div></div>'
             . '<h2>Commandes</h2>' . Html::table(['Commande', 'Date', '#Total', 'Statut'], array_map(static fn (array $o): array => [
-                '<a href="' . View::url('/pro/commandes/' . $o['id']) . '">cmd_' . (int) $o['id'] . '</a>', View::date($o['created_at']), View::fcfa($o['total']), Orders::orderBadge($o['status']),
+                '<a href="' . View::url('/pro/commandes/' . $o['id']) . '">n° ' . (int) $o['id'] . '</a>', View::date($o['created_at']), View::fcfa($o['total']), Orders::orderBadge($o['status']),
             ], $orders), 'Aucune commande.');
         Html::page($u['name'], $body, $u['role'] === 'merchant' ? 'Fiche utilisateur (commerçant)' : 'Fiche utilisateur (client)');
     }

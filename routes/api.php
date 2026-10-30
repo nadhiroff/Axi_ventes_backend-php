@@ -46,6 +46,10 @@ return static function (Router $r): void {
     $r->get('/v1/me/settings', [AccountController::class, 'settings'], $user);
     $r->patch('/v1/me/settings', [AccountController::class, 'updateSettings'], $user);
     $r->post('/v1/me/data-usage', [AccountController::class, 'dataUsage'], $user);
+    $r->delete('/v1/me/data-usage', [AccountController::class, 'resetDataUsage'], $user);
+    $r->post('/v1/me/push-token', [AccountController::class, 'savePushToken'], $user);
+    $r->get('/v1/me/client-invites', [AccountController::class, 'clientInvites'], $user);
+    $r->post('/v1/me/client-invites/{id}/{answer}', [AccountController::class, 'answerClientInvite'], $user);
     $r->get('/v1/me/sessions', [AccountController::class, 'sessions'], $user);
     $r->delete('/v1/me/sessions/{id}', [AccountController::class, 'revokeSession'], $user);
     $r->get('/v1/me/login-history', [AccountController::class, 'loginHistory'], $user);
@@ -71,6 +75,7 @@ return static function (Router $r): void {
     $r->delete('/v1/conversations/{id}/messages/{message}', [MessagesController::class, 'delete'], $user);
     $r->post('/v1/conversations/{id}/read', [MessagesController::class, 'read'], $user);
     $r->delete('/v1/conversations/{id}', [MessagesController::class, 'clear'], $user);
+    $r->patch('/v1/conversations/{id}/settings', [MessagesController::class, 'settings'], $user);
     $r->post('/v1/conversations/{id}/messages/{message}/hide', [MessagesController::class, 'hide'], $user);
     $r->get('/v1/users/{id}/profile', [ProfileController::class, 'show'], $user);
     $r->post('/v1/users/{id}/report', [ProfileController::class, 'report'], $user);
@@ -116,6 +121,7 @@ return static function (Router $r): void {
     $r->post('/v1/webhooks/fedapay', [PaymentController::class, 'fedapayWebhook']);
     $r->post('/v1/webhooks/kkiapay', [PaymentController::class, 'kkiapayWebhook']);
     $r->get('/v1/media/audio', [MediaController::class, 'audio']);
+    $r->get('/v1/media/video', [MediaController::class, 'video']);
 
     // Commerçant
     $r->get('/v1/merchant/stall-options', [StallController::class, 'options'], $user);

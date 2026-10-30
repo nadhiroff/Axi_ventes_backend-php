@@ -231,7 +231,7 @@ final class Escrow
         });
         foreach ($released as $part) {
             $owner = (int) Database::value('SELECT user_id FROM stalls WHERE id = ?', [$part['stall_id']]);
-            Notifier::send($owner, 'payment', 'Argent libéré', 'Le client a reçu la commande cmd_' . $orderId . ' : ' . self::fcfa((int) $part['net_amount']) . ' sont libérés pour vous.', ['order_id' => 'cmd_' . $orderId]);
+            Notifier::send($owner, 'payment', 'Argent libéré', 'Le client a reçu la commande n° ' . $orderId . ' : ' . self::fcfa((int) $part['net_amount']) . ' sont libérés pour vous.', ['order_id' => 'cmd_' . $orderId]);
         }
     }
 
@@ -281,7 +281,7 @@ final class Escrow
             [$decision === 'refund' ? 'resolved_refund' : 'resolved_release', $note, $agentId, Clock::now(), $disputeId],
         );
         self::syncOrderAfterEscrow((int) $dispute['order_id']);
-        Notifier::send((int) $dispute['client_id'], 'order', 'Votre litige a été examiné', 'Décision d\'Axi pour la commande cmd_' . $dispute['order_id'] . ' : ' . ($decision === 'refund' ? 'remboursement' : 'commerçants payés') . '. ' . $note, ['order_id' => 'cmd_' . $dispute['order_id']]);
+        Notifier::send((int) $dispute['client_id'], 'order', 'Votre litige a été examiné', 'Décision d\'Axi pour la commande n° ' . $dispute['order_id'] . ' : ' . ($decision === 'refund' ? 'remboursement' : 'commerçants payés') . '. ' . $note, ['order_id' => 'cmd_' . $dispute['order_id']]);
         return $message;
     }
 
@@ -349,7 +349,7 @@ final class Escrow
             self::log('payment_' . $status, ['payment' => $payment['id'], 'order' => $orderId], 'partner', $actorId, $payment['status'], $status, $result['provider_ref'], $amount + $fees);
         });
         self::syncOrderAfterEscrow($orderId);
-        Notifier::send((int) $payment['user_id'], 'payment', 'Remboursement', 'Axi a décidé un remboursement de ' . self::fcfa($amount + $fees) . ' pour la commande cmd_' . $orderId . '. ' . $result['message'], ['order_id' => 'cmd_' . $orderId]);
+        Notifier::send((int) $payment['user_id'], 'payment', 'Remboursement', 'Axi a décidé un remboursement de ' . self::fcfa($amount + $fees) . ' pour la commande n° ' . $orderId . '. ' . $result['message'], ['order_id' => 'cmd_' . $orderId]);
         return self::fcfa($amount + $fees) . ' : ' . $result['message'];
     }
 
@@ -377,7 +377,7 @@ final class Escrow
             self::log('payment_refunded', ['payment' => $payment['id'], 'order' => $orderId], 'partner', $actorId, $payment['status'], 'refunded', $result['provider_ref'], $amount);
         });
         self::syncOrderAfterEscrow($orderId);
-        Notifier::send((int) $payment['user_id'], 'payment', 'Remboursement', 'Axi vous rembourse les frais payés en ligne (' . self::fcfa($amount) . ') pour la commande cmd_' . $orderId . '. ' . $result['message'], ['order_id' => 'cmd_' . $orderId]);
+        Notifier::send((int) $payment['user_id'], 'payment', 'Remboursement', 'Axi vous rembourse les frais payés en ligne (' . self::fcfa($amount) . ') pour la commande n° ' . $orderId . '. ' . $result['message'], ['order_id' => 'cmd_' . $orderId]);
         return self::fcfa($amount) . ' : ' . $result['message'];
     }
 
@@ -462,7 +462,7 @@ final class Escrow
             $existing = Database::value('SELECT id FROM merchant_clients WHERE stall_id = ? AND (user_id = ? OR (phone IS NOT NULL AND phone = ?))', [$part['stall_id'], $order['client_id'], $order['phone']]);
             if ($existing !== null) {
                 Database::run(
-                    'UPDATE merchant_clients SET user_id = COALESCE(user_id, ?), email = COALESCE(email, ?), orders_count = orders_count + 1, total_spent = total_spent + ?, last_order_at = ? WHERE id = ?',
+                    'UPDATE merchant_clients SET user_id = COALESCE(user_id, ?), email = COALESCE(email, ?), invite_status = \'accepted\', orders_count = orders_count + 1, total_spent = total_spent + ?, last_order_at = ? WHERE id = ?',
                     [$order['client_id'], $order['email'], $part['items_total'], Clock::now(), $existing],
                 );
             } else {
@@ -479,11 +479,11 @@ final class Escrow
         $order = Database::one('SELECT * FROM orders WHERE id = ?', [$orderId]);
         $onSite = $order['payment_mode'] === 'on_site';
         $text = $onSite
-            ? 'Nous avons reçu ' . self::fcfa((int) $order['total']) . ' de frais pour la commande cmd_' . $orderId . '. Vous paierez ' . self::fcfa((int) $order['items_total']) . ' en espèces au commerçant à la remise.'
-            : 'Nous avons reçu ' . self::fcfa((int) $order['total']) . ' pour la commande cmd_' . $orderId . '. L\'argent reste chez Axi jusqu\'à ce que vous confirmiez la réception.';
+            ? 'Nous avons reçu ' . self::fcfa((int) $order['total']) . ' de frais pour la commande n° ' . $orderId . '. Vous paierez ' . self::fcfa((int) $order['items_total']) . ' en espèces au commerçant à la remise.'
+            : 'Nous avons reçu ' . self::fcfa((int) $order['total']) . ' pour la commande n° ' . $orderId . '. L\'argent reste chez Axi jusqu\'à ce que vous confirmiez la réception.';
         Notifier::send((int) $order['client_id'], 'payment', 'Paiement reçu', $text, ['order_id' => 'cmd_' . $orderId], [
             [$text],
-            ['rows' => [['Commande', 'cmd_' . $orderId], ['Montant payé', self::fcfa((int) $order['total'])]]],
+            ['rows' => [['Commande', 'n° ' . $orderId], ['Montant payé', self::fcfa((int) $order['total'])]]],
         ]);
         foreach (Database::all('SELECT os.*, s.user_id FROM order_stalls os JOIN stalls s ON s.id = os.stall_id WHERE os.order_id = ?', [$orderId]) as $part) {
             $items = Database::all('SELECT name, quantity FROM order_items WHERE order_stall_id = ?', [$part['id']]);

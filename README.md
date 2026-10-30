@@ -16,7 +16,7 @@ mysql -u admin -p axi < database/reset.sql                    # base neuve + un 
 php -S 0.0.0.0:8000 -t public public/index.php
 ```
 
-- API : `http://<IP du PC>:8000/v1/health` (IP : `hostname -I`) → dans le frontend `EXPO_PUBLIC_API_URL=http://<IP>:8000`
+- API : `http://<IP du PC>:8000/v1/health` (IP : `hostname -I`) → le frontend trouve cette IP tout seul (rien à écrire)
 - Espace partenaire : `http://localhost:8000/` (redirige vers `/pro/connexion`)
 
 ## Comptes de test (créés par `database/reset.sql`)

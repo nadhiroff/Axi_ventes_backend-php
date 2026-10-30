@@ -173,7 +173,7 @@ final class Admin
             View::date($a['created_at']), View::e($a['name']), View::e($a['action']), View::e($a['target_type'] . ($a['target_id'] ? ' #' . $a['target_id'] : '')), '<code style="font-size:12px">' . View::e(mb_strimwidth((string) $a['details'], 0, 160, '…')) . '</code>',
         ], $actions)) . '<h2>Paiements et séquestre</h2>' . Html::table(['Date', 'Événement', 'Par', 'Commande', 'Avant → après', 'Référence', '#Montant'], array_map(static fn (array $e): array => [
             View::date($e['created_at']), View::e($e['event']), View::e($e['actor_type'] . ($e['actor_id'] ? ' #' . $e['actor_id'] : '')),
-            $e['order_id'] ? '<a href="' . View::url('/pro/commandes/' . $e['order_id']) . '">cmd_' . (int) $e['order_id'] . '</a>' : '—',
+            $e['order_id'] ? '<a href="' . View::url('/pro/commandes/' . $e['order_id']) . '">n° ' . (int) $e['order_id'] . '</a>' : '—',
             View::e(($e['old_state'] ?? '∅') . ' → ' . ($e['new_state'] ?? '∅')), View::e($e['gateway_ref'] ?? ''), $e['amount'] === null ? '' : View::fcfa($e['amount']),
         ], $events)), 'Qui a fait quoi, et quand.');
     }

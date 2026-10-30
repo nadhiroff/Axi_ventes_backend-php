@@ -59,7 +59,7 @@ final class Money
                 [$label, $tone] = self::STATUS[$p['status']];
                 return [
                     View::date($p['created_at']), View::e($p['reference']), View::e($p['provider']) . '<br><span class="muted">' . View::e($p['provider_ref'] ?? '—') . ' · ' . View::e($p['gateway_status'] ?? '') . '</span>',
-                    $p['order_id'] !== null ? '<a href="' . View::url('/pro/commandes/' . $p['order_id']) . '">cmd_' . (int) $p['order_id'] . '</a>' : 'Abonnement',
+                    $p['order_id'] !== null ? '<a href="' . View::url('/pro/commandes/' . $p['order_id']) . '">n° ' . (int) $p['order_id'] . '</a>' : 'Abonnement',
                     View::e($p['name']), View::fcfa($p['amount']) . ((int) $p['refunded_amount'] > 0 ? '<br><span class="muted">remb. ' . View::fcfa($p['refunded_amount']) . '</span>' : ''),
                     View::badge($label, $tone), View::date($p['checked_at']),
                     $p['status'] === 'pending' ? View::action('/pro/paiements/' . $p['id'] . '/verifier', 'Vérifier', [], null, 'btn ghost') : '',

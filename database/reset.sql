@@ -12,7 +12,7 @@
 SET NAMES utf8mb4;
 SET time_zone = '+00:00';
 SET FOREIGN_KEY_CHECKS = 0;
-DROP TABLE IF EXISTS stall_announcement_photos, stall_emails, stall_announcements, reports, message_hidden, stall_photos, messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
+DROP TABLE IF EXISTS push_tokens, stall_announcement_photos, stall_emails, stall_announcements, reports, message_hidden, stall_photos, messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
 SET FOREIGN_KEY_CHECKS = 1;
 
 CREATE TABLE schema_migrations (
@@ -1029,6 +1029,84 @@ INSERT INTO stall_announcement_photos (announcement_id, path, width, height, pos
 SELECT id, photo_path, COALESCE(photo_width, 600), COALESCE(photo_height, 600), 0 FROM stall_announcements WHERE photo_path IS NOT NULL;
 
 INSERT INTO schema_migrations (file, applied_at) VALUES ('011_annonces_date_fin_photos.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 012_notifications_telephone.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 012 : notifications du téléphone (alertes système, même application fermée).
+--       Un jeton Expo par téléphone, lié à la session : déconnexion = plus d'alerte sur ce téléphone.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+CREATE TABLE push_tokens (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id INT UNSIGNED NOT NULL,
+  auth_token_id INT UNSIGNED NOT NULL,
+  token VARCHAR(255) NOT NULL,
+  platform ENUM('ios','android','web') NOT NULL,
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL,
+  UNIQUE KEY uq_push_token (token),
+  KEY idx_push_user (user_id),
+  CONSTRAINT fk_push_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_push_auth FOREIGN KEY (auth_token_id) REFERENCES auth_tokens(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('012_notifications_telephone.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 013_chat_videos.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 013 : vidéos dans les discussions (une minute au plus, fichier dans storage/video).
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+ALTER TABLE messages MODIFY kind ENUM('text','photo','voice','video') NOT NULL DEFAULT 'text';
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('013_chat_videos.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 014_duree_messages.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 014 : durée des messages réglée par le commerçant, discussion par discussion.
+--       24 h par défaut pour tout le monde ; 48 h au plus sans abonnement ; 30 ou 90 jours abonné.
+--       Suivre l'étal ne garde plus les messages : les messages gardés jusqu'ici partent dans 30 jours.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+ALTER TABLE conversations ADD COLUMN retention_hours SMALLINT UNSIGNED NOT NULL DEFAULT 24 AFTER stall_id;
+
+UPDATE messages SET expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL 30 DAY) WHERE expires_at IS NULL;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('014_duree_messages.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 015_invitation_client.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 015 : un client (ou commerçant) ajouté à la main par un commerçant doit ACCEPTER avant toute discussion.
+--       Suivre l'étal ou y commander vaut accord. Les clients déjà dans les fichiers restent acceptés.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+ALTER TABLE merchant_clients
+  ADD COLUMN invite_status ENUM('accepted','pending','declined') NOT NULL DEFAULT 'accepted' AFTER user_id,
+  ADD COLUMN invited_at DATETIME NULL AFTER invite_status,
+  ADD COLUMN answered_at DATETIME NULL AFTER invited_at;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('015_invitation_client.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 016_autres_numeros.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 016 : demande commerçant et étal : jusqu'à 2 autres numéros (MTN, Moov, Celtiis : un par opérateur).
+--       Pièce d'identité : « Autre » n'est plus proposé (CNI, CIP ou passeport).
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+ALTER TABLE merchant_applications ADD COLUMN other_phones VARCHAR(80) NULL AFTER phone;
+ALTER TABLE stalls ADD COLUMN other_phones VARCHAR(80) NULL AFTER whatsapp;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('016_autres_numeros.sql', UTC_TIMESTAMP());
 
 -- -----------------------------------------------------------------------------
 -- Comptes de test (un par rôle, et un par type de partenaire). Changer les mots de passe en production.

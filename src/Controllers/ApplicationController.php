@@ -55,7 +55,7 @@ final class ApplicationController
         }
         $in = Validator::validate($req->all(), [
             'phone' => 'required|phone',
-            'id_type' => 'required|in:cni,cip,passport,other',
+            'id_type' => 'required|in:cni,cip,passport',
             'id_number' => 'required|string|max:40',
             'stall_name' => 'required|string|max:100',
             'merchant_type' => 'in:retail,wholesale',
@@ -66,6 +66,21 @@ final class ApplicationController
             'row' => 'string|max:30',
             'stand' => 'string|max:20',
         ], self::LABELS);
+
+        // Autres numéros (un par opérateur : MTN, Moov, Celtiis) : 2 au plus, différents du principal
+        $others = [];
+        foreach (array_slice((array) ($req->all()['other_phones'] ?? []), 0, 3) as $i => $raw) {
+            if (!is_string($raw) || trim($raw) === '') {
+                continue;
+            }
+            $phone = Validator::phone(trim($raw)) ?? Validator::fail(['other_phones' => 'Le numéro ' . ($i + 2) . ' ne semble pas valide.'], self::LABELS);
+            if ($phone !== $in['phone'] && !in_array($phone, $others, true)) {
+                $others[] = $phone;
+            }
+        }
+        if (count($others) > 2) {
+            Validator::fail(['other_phones' => '3 numéros au plus (un par opérateur).'], self::LABELS);
+        }
 
         [$siteId, $siteOther] = self::choice($in, 'site', 'SELECT id FROM sites WHERE id = ? AND active = 1', 'Choisissez votre marché ou écrivez son nom dans « Autre ».');
         [$aisleId, $aisleOther] = self::choice($in, 'aisle', 'SELECT id FROM aisles WHERE id = ? AND active = 1', 'Choisissez votre allée ou écrivez son nom dans « Autre ».');
@@ -85,9 +100,9 @@ final class ApplicationController
         $stallPhoto = Uploads::photo($req->file('stall_photo'))['path'];
 
         Database::insert(
-            'INSERT INTO merchant_applications (user_id, phone, id_type, id_number, id_front_path, id_back_path, selfie_path, stall_photo_path, stall_name, merchant_type, site_id, site_other, aisle_id, aisle_other, row_label, stand, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [$req->userId(), $in['phone'], $in['id_type'], $in['id_number'], $front, $back, $selfie, $stallPhoto, $in['stall_name'], $in['merchant_type'] ?? 'retail',
+            'INSERT INTO merchant_applications (user_id, phone, other_phones, id_type, id_number, id_front_path, id_back_path, selfie_path, stall_photo_path, stall_name, merchant_type, site_id, site_other, aisle_id, aisle_other, row_label, stand, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [$req->userId(), $in['phone'], $others === [] ? null : implode(',', $others), $in['id_type'], $in['id_number'], $front, $back, $selfie, $stallPhoto, $in['stall_name'], $in['merchant_type'] ?? 'retail',
                 $siteId, $siteOther, $aisleId, $aisleOther, $in['row'] ?? null, $in['stand'] ?? null, Clock::now()],
         );
         if ($req->user['phone'] === null && Database::value('SELECT id FROM users WHERE phone = ?', [$in['phone']]) === null) {

@@ -15,6 +15,8 @@ final class Uploads
 {
     private const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
     private const MAX_AUDIO_BYTES = 3 * 1024 * 1024;
+    // Vidéo d'une minute au plus, compressée par le téléphone avant l'envoi
+    private const MAX_VIDEO_BYTES = 30 * 1024 * 1024;
     private const SIZES = ['thumb' => [200, 15000], 'medium' => [600, 60000]];
 
     /** @return array{path: string, width: int, height: int} chemin relatif à public/, taille de « medium » */
@@ -82,6 +84,25 @@ final class Uploads
             throw new HttpException(422, 'INVALID_AUDIO', 'Le fichier envoyé n\'est pas un enregistrement audio.');
         }
         $relative = 'audio/' . gmdate('Y/m') . '/' . bin2hex(random_bytes(12)) . '.m4a';
+        $path = BASE_PATH . '/storage/' . $relative;
+        if (!is_dir(dirname($path)) && !mkdir(dirname($path), 0775, true) && !is_dir(dirname($path))) {
+            throw new \RuntimeException('Impossible de créer ' . dirname($path));
+        }
+        if (!move_uploaded_file($file['tmp_name'], $path) && !rename($file['tmp_name'], $path)) {
+            throw new \RuntimeException("Impossible d'enregistrer $path");
+        }
+        return $relative;
+    }
+
+    /** Vidéo du chat (MP4 ou MOV, gardée telle quelle) ; @return string chemin relatif à storage/ */
+    public static function video(array $file): string
+    {
+        self::checkUpload($file, self::MAX_VIDEO_BYTES, 'La vidéo');
+        $mime = (string) (new \finfo(FILEINFO_MIME_TYPE))->file($file['tmp_name']);
+        if (!in_array($mime, ['video/mp4', 'video/quicktime', 'video/3gpp', 'application/octet-stream'], true)) {
+            throw new HttpException(422, 'INVALID_VIDEO', 'Le fichier envoyé n\'est pas une vidéo (MP4 ou MOV).');
+        }
+        $relative = 'video/' . gmdate('Y/m') . '/' . bin2hex(random_bytes(12)) . ($mime === 'video/quicktime' ? '.mov' : '.mp4');
         $path = BASE_PATH . '/storage/' . $relative;
         if (!is_dir(dirname($path)) && !mkdir(dirname($path), 0775, true) && !is_dir(dirname($path))) {
             throw new \RuntimeException('Impossible de créer ' . dirname($path));

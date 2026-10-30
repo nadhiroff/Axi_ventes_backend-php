@@ -69,7 +69,7 @@ final class Applications
         $info = '<div class="card"><h2>Personne</h2><dl>'
             . '<dt>Nom</dt><dd>' . View::e($a['name']) . '</dd>'
             . '<dt>Email</dt><dd>' . View::e($a['email']) . '</dd>'
-            . '<dt>Téléphone</dt><dd>' . View::e($a['phone']) . '</dd>'
+            . '<dt>Téléphone</dt><dd>' . View::e($a['phone']) . ($a['other_phones'] ? ' · ' . View::e(str_replace(',', ' · ', $a['other_phones'])) : '') . '</dd>'
             . '<dt>Pièce</dt><dd>' . View::e(self::ID_TYPES[$a['id_type']] . ' n° ' . $a['id_number']) . '</dd>'
             . '<dt>Compte créé le</dt><dd>' . View::date($a['user_created_at'], false) . '</dd>'
             . '<dt>Demande</dt><dd>' . View::badge($label, $tone) . ' · ' . View::date($a['created_at']) . '</dd>'
@@ -153,7 +153,7 @@ final class Applications
                 'row_label' => $a['row_label'], 'stand' => $a['stand'], 'merchant_type' => $a['merchant_type'],
                 'photo_path' => $a['stall_photo_path'], 'photo_width' => $size[0], 'photo_height' => $size[1],
                 'verification_photo_path' => $a['stall_photo_path'], 'verified_at' => $now, 'verified_by' => $agent['id'],
-                'phone' => $a['phone'], 'whatsapp' => $a['phone'], 'status' => 'active', 'updated_at' => $now,
+                'phone' => $a['phone'], 'whatsapp' => $a['phone'], 'other_phones' => $a['other_phones'] ?? null, 'status' => 'active', 'updated_at' => $now,
             ];
             $existing = Database::value('SELECT id FROM stalls WHERE user_id = ?', [$a['user_id']]);
             if ($existing !== null) {

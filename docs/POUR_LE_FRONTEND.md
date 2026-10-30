@@ -76,7 +76,7 @@ Messages effacés 24 h après l'envoi (`message_ttl_hours`), sauf si le client s
 
 | Route | Rôle |
 |---|---|
-| `GET /v1/me/settings` · `PATCH /v1/me/settings` | `theme (system\|light\|dark), date_format, notifications {type: {app, email}}, default_address, preferred_point_id, preferred_operator, preferred_payment_phone, data_cap_mb` ; la réponse contient aussi `axi_points` et `data { cap_mb, used_bytes, used_pct }` |
+| `GET /v1/me/settings` · `PATCH /v1/me/settings` · `DELETE /v1/me/data-usage` (compteur à zéro) | `theme (system\|light\|dark), date_format, notifications {type: {app, email}}, default_address, preferred_point_id, preferred_operator, preferred_payment_phone, data_cap_mb` ; la réponse contient aussi `axi_points` et `data { cap_mb, used_bytes, used_pct }` |
 | `POST /v1/me/data-usage` | `{ bytes }` : consommation mesurée par l'application |
 | `GET /v1/me/sessions` · `DELETE /v1/me/sessions/{ses_…}` | appareils connectés |
 | `GET /v1/me/login-history` | 30 dernières connexions (réussies et refusées) |

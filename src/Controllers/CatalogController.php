@@ -125,14 +125,14 @@ final class CatalogController
     {
         $id = $this->stallId($req);
         Database::run('INSERT IGNORE INTO stall_follows (user_id, stall_id, created_at) VALUES (?, ?, ?)', [$req->userId(), $id, Clock::now()]);
-        // Suivre l'étal garde la conversation avec le commerçant (sinon effacée après 24 h)
-        \Axi\Services\Messaging::keep($req->userId(), $id);
-        // et ajoute la personne au fichier « Mes clients » du commerçant (abonné)
+        // Suivre l'étal ajoute la personne au fichier « Mes clients » du commerçant (abonné)
         Database::run(
             "INSERT IGNORE INTO merchant_clients (stall_id, user_id, display_name, email, created_at)
              SELECT ?, id, CONCAT(first_name, ' ', LEFT(last_name, 1), '.'), email, ? FROM users WHERE id = ?",
             [$id, Clock::now(), $req->userId()],
         );
+        // Suivre l'étal vaut accord à une invitation en attente
+        Database::run('UPDATE merchant_clients SET invite_status = \'accepted\', answered_at = COALESCE(answered_at, ?) WHERE stall_id = ? AND user_id = ? AND invite_status <> \'accepted\'', [Clock::now(), $id, $req->userId()]);
         Response::ok(['is_followed' => true]);
     }
 
@@ -140,7 +140,6 @@ final class CatalogController
     {
         $id = $this->stallId($req);
         Database::run('DELETE FROM stall_follows WHERE user_id = ? AND stall_id = ?', [$req->userId(), $id]);
-        \Axi\Services\Messaging::release($req->userId(), $id);
         Response::ok(['is_followed' => false]);
     }
 
