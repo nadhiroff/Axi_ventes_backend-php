@@ -27,7 +27,7 @@ final class ProfileController
         $id = $req->id('usr', 'USER_NOT_FOUND', 'Profil introuvable.');
         $u = Database::one("SELECT * FROM users WHERE id = ? AND status <> 'deleted' AND role IN ('client','merchant')", [$id])
             ?? throw new HttpException(404, 'USER_NOT_FOUND', 'Profil introuvable.');
-        if ($id !== $me && !$this->related($me, $id)) {
+        if ($id !== $me && !$this->related($me, $id) && !$this->foundByContact($me, $u, (string) $req->query('contact', ''))) {
             throw new HttpException(404, 'USER_NOT_FOUND', 'Profil introuvable.');
         }
         $stall = $u['role'] === 'merchant' ? Stalls::findByUser($id) : null;
@@ -73,6 +73,20 @@ final class ProfileController
     public static function reasonLabel(string $reason): string
     {
         return self::REASONS[$reason] ?? $reason;
+    }
+
+    /**
+     * Commerçant qui vient de retrouver cette personne par son email ou son téléphone EXACT (« Ajouter un client ») :
+     * il peut voir sa présentation avant de l'ajouter.
+     */
+    private function foundByContact(int $me, array $u, string $contact): bool
+    {
+        if ($contact === '' || Database::value('SELECT id FROM stalls WHERE user_id = ?', [$me]) === null) {
+            return false;
+        }
+        $email = Validator::email($contact);
+        $phone = $email === null ? Validator::phone($contact) : null;
+        return ($email !== null && $email === $u['email']) || ($phone !== null && $phone === $u['phone']);
     }
 
     /** Conversation entre les deux, ou l'un est client du commerçant de l'autre */
