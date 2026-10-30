@@ -1107,3 +1107,117 @@ ALTER TABLE merchant_applications ADD COLUMN other_phones VARCHAR(80) NULL AFTER
 ALTER TABLE stalls ADD COLUMN other_phones VARCHAR(80) NULL AFTER whatsapp;
 
 INSERT INTO schema_migrations (file, applied_at) VALUES ('016_autres_numeros.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 017_historique_cache.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 017 : « Mes achats et paiements » : vider l'historique ou le laisser disparaître après 3, 6 ou 12 mois.
+--       Seulement caché pour la personne : les commandes et paiements restent en base (preuves, comptabilité).
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+CREATE TABLE sales_hidden (
+  user_id INT UNSIGNED NOT NULL,
+  order_id INT UNSIGNED NOT NULL,
+  side ENUM('buyer','seller') NOT NULL,
+  created_at DATETIME NOT NULL,
+  PRIMARY KEY (user_id, order_id, side),
+  CONSTRAINT fk_sales_hidden_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_sales_hidden_order FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+ALTER TABLE user_settings ADD COLUMN history_months TINYINT UNSIGNED NOT NULL DEFAULT 0;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('017_historique_cache.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 018_credit_partage_retire.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 018 : une demande de crédit ne peut pas rester « en cours » sans accord de partage :
+--       personne ne peut l'étudier. Les demandes déjà dans ce cas sont closes.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+UPDATE credits c SET c.status = 'declined', c.note = 'Demande close : partage de l''historique retiré.', c.decided_at = UTC_TIMESTAMP()
+WHERE c.status IN ('new', 'in_review')
+  AND NOT EXISTS (SELECT 1 FROM data_sharing_consents k WHERE k.merchant_user_id = c.merchant_user_id AND k.organization_id = c.organization_id AND k.revoked_at IS NULL);
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('018_credit_partage_retire.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 019_credit_complet.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 019 : crédit de bout en bout : offre de l'IMF, acceptation du commerçant, versement, remboursements
+--       (saisis par l'IMF, ou retenus sur les versements Axi si le commerçant l'a accepté), commission d'apport.
+--       « granted » veut désormais dire : versé, en cours de remboursement.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+ALTER TABLE credits
+  MODIFY status ENUM('new','in_review','offered','accepted','granted','declined','repaid') NOT NULL DEFAULT 'new',
+  ADD COLUMN repay_total INT UNSIGNED NULL AFTER amount,
+  ADD COLUMN term_months TINYINT UNSIGNED NULL AFTER repay_total,
+  ADD COLUMN withhold_pct TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER term_months,
+  ADD COLUMN commission INT UNSIGNED NOT NULL DEFAULT 0 AFTER withhold_pct,
+  ADD COLUMN repaid_amount INT UNSIGNED NOT NULL DEFAULT 0 AFTER commission,
+  ADD COLUMN accepted_at DATETIME NULL AFTER decided_at,
+  ADD COLUMN disbursed_at DATETIME NULL AFTER accepted_at,
+  ADD COLUMN disbursed_ref VARCHAR(80) NULL AFTER disbursed_at;
+
+CREATE TABLE credit_repayments (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  credit_id INT UNSIGNED NOT NULL,
+  amount INT UNSIGNED NOT NULL,
+  source ENUM('manual','payout') NOT NULL,
+  payout_id INT UNSIGNED NULL,
+  created_by INT UNSIGNED NULL,
+  created_at DATETIME NOT NULL,
+  KEY idx_credit_repayments (credit_id, id),
+  CONSTRAINT fk_credit_repayments FOREIGN KEY (credit_id) REFERENCES credits(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+INSERT INTO settings (k, v, label, type) VALUES ('credit_commission_rate', '2', 'Commission d''apport d''Axi sur chaque crédit versé, %', 'int');
+
+-- Anciens crédits « accordés » : rien n'a été versé par l'application, ils attendent leur versement
+UPDATE credits SET status = 'accepted', repay_total = amount, term_months = 1, accepted_at = decided_at WHERE status = 'granted';
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('019_credit_complet.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 020_annonces_simples.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 020 : annonces simples : image ou vidéo, partagées aux clients, aux commerçants ou à tous ;
+--       chacun peut signaler une annonce, l'équipe Axi voit les signalements et la corrige directement.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+ALTER TABLE campaigns
+  MODIFY audience_type ENUM('merchants','clients','all') NOT NULL,
+  ADD COLUMN video_path VARCHAR(255) NULL AFTER image_path;
+
+CREATE TABLE campaign_reports (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  campaign_id INT UNSIGNED NOT NULL,
+  user_id INT UNSIGNED NOT NULL,
+  reason VARCHAR(30) NOT NULL,
+  status ENUM('open','handled') NOT NULL DEFAULT 'open',
+  created_at DATETIME NOT NULL,
+  UNIQUE KEY uq_campaign_report (campaign_id, user_id),
+  KEY idx_campaign_reports (status, campaign_id),
+  CONSTRAINT fk_campaign_report FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
+  CONSTRAINT fk_campaign_report_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('020_annonces_simples.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 021_email_contact.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 021 : adresse de contact montrée aux comptes bloqués, pour connaître la raison ou contester.
+--       Vide : l'adresse d'envoi des emails d'Axi est utilisée.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+INSERT INTO settings (k, v, label, type) VALUES ('support_email', '', 'Email de contact des comptes bloqués (vide = adresse d''envoi des emails)', 'text');
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('021_email_contact.sql', UTC_TIMESTAMP());

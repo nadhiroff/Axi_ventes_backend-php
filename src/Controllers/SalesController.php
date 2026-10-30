@@ -5,6 +5,7 @@ namespace Axi\Controllers;
 
 use Axi\Core\Clock;
 use Axi\Core\Database;
+use Axi\Core\HttpException;
 use Axi\Core\Ids;
 use Axi\Core\Request;
 use Axi\Core\Response;
@@ -30,11 +31,43 @@ final class SalesController
 
     private const PROVIDERS = ['fedapay' => 'FedaPay', 'kkiapay' => 'KkiaPay', 'fake' => 'Test'];
 
+    /** Rien d'encore en jeu : pas de litige ouvert ni de remboursement en attente */
+    private const NO_PENDING = "NOT EXISTS (SELECT 1 FROM disputes d WHERE d.order_id = o.id AND d.status = 'open')
+        AND NOT EXISTS (SELECT 1 FROM refunds rf JOIN payments pp ON pp.id = rf.payment_id WHERE pp.order_id = o.id AND rf.status = 'pending')";
+    /** Commande terminée : la seule qu'on peut cacher. Un litige ou un remboursement la fait réapparaître. */
+    public const FINISHED = [
+        'buyer' => "(o.status IN ('delivered', 'refunded', 'cancelled') AND " . self::NO_PENDING . ')',
+        // Commerçant : argent versé, remboursé, encaissé à la remise, ou part annulée
+        'seller' => "((os.status = 'cancelled' OR os.escrow_state = 'refunded' OR (os.escrow_state = 'cash' AND os.status = 'delivered') OR (os.escrow_state = 'released' AND os.payout_id IS NOT NULL)) AND " . self::NO_PENDING . ')',
+    ];
+
     public function index(Request $req): never
     {
         $filters = $this->filters($req->queryAll());
         [$rows, $totals] = $this->rows($req->userId(), (string) $req->role(), $filters);
         Response::ok(['rows' => $rows, 'totals' => $totals, 'filters' => $filters]);
+    }
+
+    /** Cacher de mon historique : { order_id } ou { all: true } (commandes terminées) ; { side: 'buyer' } : mes achats, même si je suis commerçant */
+    public function hide(Request $req): never
+    {
+        $body = $req->all();
+        $orderId = isset($body['order_id']) ? Ids::decode('cmd', (string) $body['order_id'], 'ORDER_NOT_FOUND', 'Commande introuvable.') : null;
+        if ($orderId === null && ($body['all'] ?? false) !== true) {
+            Validator::fail(['order_id' => 'Indiquez une commande.']);
+        }
+        $merchant = $req->role() === 'merchant' && ($body['side'] ?? '') !== 'buyer';
+        $side = $merchant ? 'seller' : 'buyer';
+        $ids = $merchant
+            ? Database::all('SELECT DISTINCT o.id FROM order_stalls os JOIN orders o ON o.id = os.order_id WHERE os.stall_id = ? AND ' . self::FINISHED[$side] . ($orderId === null ? '' : ' AND o.id = ?'), [(int) Database::value('SELECT id FROM stalls WHERE user_id = ?', [$req->userId()]), ...($orderId === null ? [] : [$orderId])])
+            : Database::all('SELECT o.id FROM orders o WHERE o.client_id = ? AND ' . self::FINISHED[$side] . ($orderId === null ? '' : ' AND o.id = ?'), [$req->userId(), ...($orderId === null ? [] : [$orderId])]);
+        if ($orderId !== null && $ids === []) {
+            throw new HttpException(409, 'ORDER_NOT_FINISHED', 'Seule une commande terminée peut être retirée de l\'historique.');
+        }
+        foreach ($ids as $row) {
+            Database::run('INSERT IGNORE INTO sales_hidden (user_id, order_id, side, created_at) VALUES (?, ?, ?, ?)', [$req->userId(), $row['id'], $side, Clock::now()]);
+        }
+        Response::ok(['hidden' => count($ids)]);
     }
 
     /** Lien d'export CSV signé, valable 10 minutes (ouvert dans le navigateur du téléphone) */
@@ -47,7 +80,8 @@ final class SalesController
     public function export(Request $req): never
     {
         $params = SignedUrl::verify('/v1/sales/export.csv', $req->queryAll());
-        [$rows, $totals] = $this->rows((int) $params['u'], (string) $params['r'], $this->filters($params), 5000);
+        // Commerçant : export toujours complet (sa comptabilité), même pour ce qu'il a retiré de son écran
+        [$rows, $totals] = $this->rows((int) $params['u'], (string) $params['r'], $this->filters($params), 5000, $params['r'] === 'merchant');
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename="axi-ventes-' . gmdate('Y-m-d') . '.csv"');
         header('Cache-Control: no-store');
@@ -84,10 +118,18 @@ final class SalesController
     }
 
     /** @return array{0: array, 1: array} lignes et totaux */
-    private function rows(int $userId, string $role, array $f, int $limit = 300): array
+    private function rows(int $userId, string $role, array $f, int $limit = 300, bool $withHidden = false): array
     {
         $where = [];
         $params = [];
+        $side = $role === 'merchant' ? 'seller' : 'buyer';
+        $finished = self::FINISHED[$side];
+        if (!$withHidden) {
+            // Caché à la main, ou plus vieux que le délai choisi (seulement si la commande est terminée)
+            $months = (int) Database::value('SELECT history_months FROM user_settings WHERE user_id = ?', [$userId]);
+            $where[] = "NOT ($finished AND (EXISTS (SELECT 1 FROM sales_hidden h WHERE h.user_id = ? AND h.order_id = o.id AND h.side = ?)" . ($months > 0 ? ' OR o.created_at < ?' : '') . '))';
+            array_push($params, $userId, $side, ...($months > 0 ? [Clock::now(-30 * 86400 * $months)] : []));
+        }
         if ($f['from'] !== null) {
             $where[] = 'o.created_at >= ?';
             $params[] = Clock::localDateStart($f['from']);
@@ -112,10 +154,10 @@ final class SalesController
                 $where[] = '(u.name LIKE ? OR CONCAT(\'cmd_\', o.id) LIKE ?)';
                 array_push($params, $like, $like);
             }
-            $sql = 'SELECT o.id, o.created_at, u.name AS counterpart, os.items_total AS amount, os.commission, os.net_amount, os.escrow_state, os.status AS part_status,
+            $sql = "SELECT $finished AS hideable, o.id, o.created_at, u.name AS counterpart, os.items_total AS amount, os.commission, os.net_amount, os.escrow_state, os.status AS part_status,
                            p.provider, p.provider_ref, o.payment_operator
                     FROM order_stalls os JOIN orders o ON o.id = os.order_id JOIN users u ON u.id = o.client_id LEFT JOIN payments p ON p.order_id = o.id
-                    WHERE ' . implode(' AND ', $where) . ' ORDER BY o.id DESC LIMIT ' . $limit;
+                    WHERE " . implode(' AND ', $where) . ' ORDER BY o.id DESC LIMIT ' . $limit;
         } else {
             $where[] = 'o.client_id = ?';
             $params[] = $userId;
@@ -129,12 +171,12 @@ final class SalesController
                 $where[] = '(EXISTS (SELECT 1 FROM order_stalls x JOIN stalls s ON s.id = x.stall_id WHERE x.order_id = o.id AND s.name LIKE ?) OR CONCAT(\'cmd_\', o.id) LIKE ?)';
                 array_push($params, $like, $like);
             }
-            $sql = 'SELECT o.id, o.created_at, o.total AS amount, 0 AS commission, o.total AS net_amount, o.status AS order_status,
-                           (SELECT GROUP_CONCAT(s.name SEPARATOR \', \') FROM order_stalls x JOIN stalls s ON s.id = x.stall_id WHERE x.order_id = o.id) AS counterpart,
+            $sql = "SELECT $finished AS hideable, o.id, o.created_at, o.total AS amount, 0 AS commission, o.total AS net_amount, o.status AS order_status,
+                           (SELECT GROUP_CONCAT(s.name SEPARATOR ', ') FROM order_stalls x JOIN stalls s ON s.id = x.stall_id WHERE x.order_id = o.id) AS counterpart,
                            (SELECT x.escrow_state FROM order_stalls x WHERE x.order_id = o.id ORDER BY x.id LIMIT 1) AS escrow_state,
                            p.provider, p.provider_ref, o.payment_operator
                     FROM orders o LEFT JOIN payments p ON p.order_id = o.id
-                    WHERE ' . implode(' AND ', $where) . ' ORDER BY o.id DESC LIMIT ' . $limit;
+                    WHERE " . implode(' AND ', $where) . ' ORDER BY o.id DESC LIMIT ' . $limit;
         }
 
         $rows = [];
@@ -153,6 +195,7 @@ final class SalesController
                 'status_label' => $label,
                 'payment_method' => trim((self::PROVIDERS[$r['provider']] ?? '—') . ' ' . strtoupper((string) $r['payment_operator'])),
                 'gateway_ref' => $r['provider_ref'],
+                'hideable' => (bool) $r['hideable'],
             ];
             if (!$cancelled) {
                 $totals['count']++;

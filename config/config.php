@@ -50,6 +50,8 @@ $config = [
         'code_max_per_hour' => 5,
         // Échecs de connexion tolérés sur 15 minutes, par email et par adresse IP
         'login_max_failures' => 5,
+        // Par adresse IP : bien plus haut, car un opérateur ou un Wi-Fi de marché partage une même adresse entre beaucoup de gens
+        'login_max_failures_ip' => 30,
         'login_window_seconds' => 900,
         // Espace web partenaire : session fermée après N minutes d'inactivité
         'web_session_minutes' => 120,

@@ -78,21 +78,23 @@ final class Stats
             }, $prices), 'Les prix médians apparaissent dès que ' . $min . ' étals vendent le même produit sur un site.') . '</div>';
 
         $side = match ($type) {
-            'advertiser' => '<div class="card"><h2>Nouvelle campagne</h2>' . Html::form('/pro/campagnes', [
-                'aisle_id' => ['Public visé', 'select', '', ['' => 'Tous les commerçants et clients'] + Merchants::options('aisles', false)],
-                'site_id' => ['Site', 'select', '', ['' => 'Tous les sites'] + Merchants::options('sites', false)],
-                'format' => ['Format', 'select', 'supplier_offer', Campaigns::FORMATS],
-                'title' => ['Titre', 'text', '', ['attrs' => ' maxlength="150" required']],
-                'budget' => ['Budget (FCFA)', 'number', '', ['attrs' => ' min="' . Settings::int('min_campaign_budget') . '" required placeholder="' . number_format(Settings::int('min_campaign_budget'), 0, ',', ' ') . ' FCFA minimum"']],
-            ], 'Lancer la campagne') . '<p class="muted small" style="margin:14px 0 0">Le ciblage se fait dans Axi. Aucune donnée personnelle n\'est transmise à l\'annonceur.</p></div>',
+            'advertiser' => '<div class="card"><h2>Nouvelle annonce</h2><p class="muted">Un titre, une description, une image ou une vidéo : elle est publiée après relecture.</p><a class="btn" href="' . View::url('/pro/campagnes') . '">Créer une annonce</a><p class="muted small" style="margin:14px 0 0">Aucune donnée personnelle n\'est transmise à l\'annonceur.</p></div>',
             'mfi', 'axi' => self::creditsCard($user),
             default => '<div class="card"><h2>Recensement</h2><p class="muted">Répartition des étals par site et par allée, données agrégées et anonymes.</p><a class="btn" href="' . View::url('/pro/recensement') . '">Voir le recensement</a></div>',
         };
 
+        // Bandeau : le plus utile d'abord (ce qui attend une action pour l'équipe Axi, le rôle du partenaire sinon)
+        $links = match ($type) {
+            'axi' => [['Demandes commerçants', '/pro/demandes'], ['Paiements et versements', '/pro/paiements']],
+            'advertiser' => [['Mes annonces', '/pro/campagnes'], ['Tendances du marché', '/pro/prix']],
+            'mfi' => [['Demandes de financement', '/pro/credits'], ['Tendances du marché', '/pro/prix']],
+            default => [['Recensement des étals', '/pro/recensement'], ['Tendances du marché', '/pro/prix']],
+        };
         Html::page(
-            'L\'espace des partenaires d\'Axi',
+            'Bonjour ' . $user['first_name'],
             $kpis . $todo . '<div class="split">' . $priceCard . '<div>' . $side . '</div></div>',
-            'Bonjour ' . $user['first_name'] . '. Pour l\'ANaGeM, les annonceurs, les institutions de financement et l\'équipe Axi. Les données affichées aux partenaires sont agrégées et anonymes.',
+            'Voici ce qui se passe sur les marchés aujourd\'hui. Les données montrées aux partenaires sont agrégées et anonymes.',
+            ['eyebrow' => 'Tableau de bord', 'links' => $links],
         );
     }
 
@@ -178,6 +180,14 @@ final class Stats
     public function sales(Request $req): never
     {
         WebAuth::require();
+        // Dates jamais vides : par défaut, les 30 jours qui précèdent la dernière vente (il y a toujours des chiffres à l'ouverture)
+        if (($_GET['to'] ?? '') === '') {
+            $_GET['to'] = Clock::localDate();
+        }
+        if (($_GET['from'] ?? '') === '') {
+            $last = Database::value('SELECT MAX(paid_at) FROM orders WHERE paid_at IS NOT NULL');
+            $_GET['from'] = date('Y-m-d', strtotime(($last === null ? $_GET['to'] : substr((string) $last, 0, 10)) . ' -30 days'));
+        }
         [$rows, $head] = $this->salesRows();
         if (($_GET['format'] ?? '') === 'csv') {
             header('Content-Type: text/csv; charset=utf-8');

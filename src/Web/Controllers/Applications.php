@@ -121,7 +121,7 @@ final class Applications
                 . '<div class="full"><textarea id="reason" name="reason" rows="3" required maxlength="300" placeholder="Expliquez ce qu\'il faut corriger"></textarea></div>'
                 . '<div class="full"><button class="btn danger" type="submit">Refuser la demande</button></div></form></div></div>';
         }
-        Html::page('Demande de ' . $a['name'], '<p><a href="' . View::url('/pro/demandes') . '">← Toutes les demandes</a></p><div class="row2">' . $info . '</div>' . $photos . $decision, 'Demande pour devenir commerçant sur Axi.');
+        Html::page('Demande de ' . $a['name'], '<div class="row2">' . $info . '</div>' . $photos . $decision, 'Demande pour devenir commerçant sur Axi.');
     }
 
     public function approve(Request $req): never

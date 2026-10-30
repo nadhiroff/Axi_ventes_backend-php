@@ -148,13 +148,15 @@ final class AuthController
     {
         $window = (int) Config::get('auth.login_window_seconds');
         $max = (int) Config::get('auth.login_max_failures');
+        $maxIp = (int) Config::get('auth.login_max_failures_ip');
+        // Seuls les mauvais mots de passe comptent : un compte bloqué doit toujours voir son motif
         $failures = Database::one(
-            'SELECT SUM(email = ?) AS by_email, SUM(ip = ?) AS by_ip FROM login_events WHERE success = 0 AND created_at > ? AND (email = ? OR ip = ?)',
+            'SELECT SUM(email = ?) AS by_email, SUM(ip = ?) AS by_ip FROM login_events WHERE success = 0 AND reason = \'bad_credentials\' AND created_at > ? AND (email = ? OR ip = ?)',
             [$email, $ip, Clock::now(-$window), $email, $ip],
         );
         // En local, la machine elle-même (tests automatiques) n'est pas limitée par adresse IP
         $ipLimited = !(Config::isLocal() && in_array($ip, ['127.0.0.1', '::1'], true));
-        if ((int) $failures['by_email'] >= $max || ($ipLimited && (int) $failures['by_ip'] >= $max)) {
+        if ((int) $failures['by_email'] >= $max || ($ipLimited && (int) $failures['by_ip'] >= $maxIp)) {
             throw new HttpException(429, 'TOO_MANY_REQUESTS', 'Trop de tentatives de connexion. Réessayez dans ' . (int) ceil($window / 60) . ' minutes.', ['retry_after' => $window]);
         }
 
@@ -167,9 +169,7 @@ final class AuthController
         }
         if ($user['status'] !== 'active') {
             self::recordLogin((int) $user['id'], $email, $ip, $device, $channel, false, 'suspended');
-            throw new HttpException(403, 'ACCOUNT_SUSPENDED', 'Votre accès à Axi a été bloqué par l\'équipe Axi.'
-                . (!empty($user['suspended_reason']) ? ' Motif : ' . $user['suspended_reason'] : '')
-                . ' Pour toute question, répondez à l\'email reçu ou contactez un agent Axi.');
+            throw Auth::suspended($user['suspended_reason'] ?? null);
         }
         if (password_needs_rehash($user['password_hash'], PASSWORD_DEFAULT)) {
             Database::run('UPDATE users SET password_hash = ? WHERE id = ?', [password_hash($password, PASSWORD_DEFAULT), $user['id']]);
@@ -286,7 +286,7 @@ final class AuthController
     {
         $user = Users::find($userId);
         if ($user['status'] !== 'active') {
-            throw new HttpException(403, 'ACCOUNT_SUSPENDED', 'Votre compte est suspendu. Contactez l\'équipe Axi.');
+            throw Auth::suspended($user['suspended_reason'] ?? null);
         }
         if ($user['role'] === 'partner') {
             throw new HttpException(403, 'PARTNER_USE_WEB', 'Les partenaires se connectent sur l\'espace web Axi Pro.');

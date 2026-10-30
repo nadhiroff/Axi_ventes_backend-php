@@ -13,6 +13,7 @@ use Axi\Core\Url;
 use Axi\Core\Validator;
 use Axi\Services\Payment\Escrow;
 use Axi\Services\Payment\Gateways;
+use Axi\Services\Credit;
 use Axi\Services\Settings;
 use Axi\Support\Merchant;
 use Axi\Support\Subscription;
@@ -29,7 +30,8 @@ final class MoneyController
         $mfi = $this->partner();
         $partner = $mfi['name'] ?? 'notre IMF partenaire';
         $consent = $mfi === null ? null : $this->consent($req->userId(), (int) $mfi['id']);
-        $pending = Database::value('SELECT 1 FROM credits WHERE merchant_user_id = ? AND status IN (\'new\', \'in_review\') LIMIT 1', [$req->userId()]) !== null;
+        $last = Database::one('SELECT * FROM credits WHERE merchant_user_id = ? ORDER BY id DESC LIMIT 1', [$req->userId()]);
+        $pending = $last !== null && in_array($last['status'], Credit::OPEN, true);
         $months = $this->monthsOfHistory((int) $stall['id']);
         $sums = Database::one(
             "SELECT COALESCE(SUM(CASE WHEN escrow_state IN ('held','disputed') THEN net_amount END), 0) AS held,
@@ -52,8 +54,24 @@ final class MoneyController
                 'title' => 'Votre historique ouvre l\'accès au crédit',
                 'text' => ($months > 0 ? Merchant::plural($months, 'mois', 'mois') . ' de ventes enregistrées sur Axi. ' : 'Vendez sur Axi pour construire votre historique. ')
                     . "Demandez un crédit à $partner sans garantie à fournir.",
-                'can_request' => $mfi !== null && !$pending,
+                // Le partage d'historique doit être activé : sinon l'app l'explique au lieu d'un refus après coup
+                'can_request' => $consent !== null && !$pending,
                 'request_pending' => $pending,
+                // Dernière demande : le commerçant suit sa réponse sans quitter Mon argent
+                'last_request' => $last === null ? null : [
+                    'status' => $last['status'],
+                    'status_label' => Credit::LABELS[$last['status']],
+                    'amount' => $last['amount'] === null ? null : (int) $last['amount'],
+                    'amount_requested' => $last['amount_requested'] === null ? null : (int) $last['amount_requested'],
+                    'note' => $last['note'],
+                    'decided_at' => Clock::iso($last['decided_at']),
+                    // Conditions de l'offre et suivi du remboursement
+                    'repay_total' => $last['repay_total'] === null ? null : (int) $last['repay_total'],
+                    'term_months' => $last['term_months'] === null ? null : (int) $last['term_months'],
+                    'withhold_pct' => (int) $last['withhold_pct'],
+                    'repaid_amount' => (int) $last['repaid_amount'],
+                    'remaining' => $last['repay_total'] === null ? null : Credit::remaining($last),
+                ],
             ],
             'data_sharing' => [
                 'partner_name' => $partner,
@@ -138,11 +156,26 @@ final class MoneyController
         if ($this->consent($req->userId(), (int) $mfi['id']) === null) {
             throw new HttpException(422, 'DATA_SHARING_REQUIRED', 'Pour demander un crédit, acceptez d\'abord de partager votre historique avec ' . $mfi['name'] . '.');
         }
-        if (Database::value('SELECT 1 FROM credits WHERE merchant_user_id = ? AND status IN (\'new\', \'in_review\')', [$req->userId()]) !== null) {
-            throw new HttpException(409, 'CREDIT_REQUEST_PENDING', 'Votre demande de crédit est déjà en cours d\'étude.');
+        if (Database::value('SELECT 1 FROM credits WHERE merchant_user_id = ? AND status IN (' . Database::in(Credit::OPEN) . ')', [$req->userId(), ...Credit::OPEN]) !== null) {
+            throw new HttpException(409, 'CREDIT_REQUEST_PENDING', 'Vous avez déjà une demande ou un crédit en cours.');
         }
         Database::run('INSERT INTO credits (merchant_user_id, organization_id, amount_requested, requested_at) VALUES (?, ?, ?, ?)', [$req->userId(), $mfi['id'], $amount, Clock::now()]);
         Response::ok(['message' => 'Demande envoyée. ' . $mfi['name'] . ' vous contactera sous 48 h.']);
+    }
+
+    /** Réponse à l'offre de l'IMF : { accept: true|false }. Accepter vaut accord sur les conditions, retenue comprise. */
+    public function answerCreditOffer(Request $req): never
+    {
+        Merchant::stall($req);
+        $accept = Validator::validate($req->all(), ['accept' => 'required|bool'], ['accept' => 'Réponse'])['accept'];
+        $accept = $accept === true || $accept === 1 || $accept === '1' || $accept === 'true';
+        $c = Database::one('SELECT * FROM credits WHERE merchant_user_id = ? AND status = \'offered\' ORDER BY id DESC LIMIT 1', [$req->userId()])
+            ?? throw new HttpException(404, 'OFFER_NOT_FOUND', 'Aucune offre en attente de votre réponse.');
+        Database::run(
+            'UPDATE credits SET status = ?, commission = ?, accepted_at = ?, note = ? WHERE id = ? AND status = \'offered\'',
+            [$accept ? 'accepted' : 'declined', $accept ? Credit::commission((int) $c['amount']) : 0, $accept ? Clock::now() : null, $accept ? $c['note'] : 'Offre refusée par le commerçant.', $c['id']],
+        );
+        Response::ok(['status' => $accept ? 'accepted' : 'declined', 'message' => $accept ? 'Offre acceptée : l\'institution va vous verser le crédit.' : 'Offre refusée.']);
     }
 
     /** Case « Partager mon historique avec l'IMF » : accord explicite (date, périmètre), révocable à tout moment */
@@ -156,6 +189,8 @@ final class MoneyController
             Database::run('INSERT INTO data_sharing_consents (merchant_user_id, organization_id, granted_at) VALUES (?, ?, ?)', [$req->userId(), $mfi['id'], Clock::now()]);
         } elseif (!$enabled && $consent !== null) {
             Database::run('UPDATE data_sharing_consents SET revoked_at = ? WHERE id = ?', [Clock::now(), $consent['id']]);
+            // Sans partage, plus personne ne peut étudier la demande : elle est close, pas laissée « en cours »
+            Database::run('UPDATE credits SET status = \'declined\', note = ?, decided_at = ? WHERE merchant_user_id = ? AND organization_id = ? AND status IN (\'new\', \'in_review\', \'offered\')', ['Demande close : partage de l\'historique retiré.', Clock::now(), $req->userId(), $mfi['id']]);
         }
         Response::ok(['enabled' => $enabled]);
     }

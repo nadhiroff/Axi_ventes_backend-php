@@ -6,6 +6,7 @@ namespace Axi\Web\Controllers;
 use Axi\Core\Database;
 use Axi\Core\Request;
 use Axi\Services\AdminLog;
+use Axi\Services\Notifier;
 use Axi\Web\Html;
 use Axi\Web\View;
 use Axi\Web\WebAuth;
@@ -42,31 +43,39 @@ final class Market
                     ];
                 }, $proposals)) . '</div>';
         }
-        $body = $proposalsHtml . '<div class="row2"><div><h2>Allées (sous-marchés)</h2>'
-            . Html::table(['Ordre', 'Allée', 'Icône', '#Étals', 'État', ''], array_map(static fn (array $a): array => [
-                (string) $a['sort_order'], '<strong>' . View::e($a['name']) . '</strong><br><span class="muted">' . View::e($a['id']) . '</span>', View::e(self::ICONS[$a['icon']]), (string) $a['stalls'],
+        // Un onglet à la fois : la liste, puis l'ajout replié en dessous
+        $view = ($_GET['vue'] ?? '') === 'marches' ? 'marches' : 'allees';
+        $tabs = '<nav class="tabs" aria-label="Allées et marchés">';
+        foreach (['allees' => 'Allées (' . count($aisles) . ')', 'marches' => 'Marchés (' . count($sites) . ')'] as $key => $label) {
+            $tabs .= '<a href="' . View::url('/pro/allees', ['vue' => $key]) . '" class="' . ($view === $key ? 'on' : '') . '">' . View::e($label) . '</a>';
+        }
+        $tabs .= '</nav>';
+        $line = static fn (array $r): string => '<strong>' . View::e($r['name']) . '</strong><br><span class="muted small">' . View::e($r['id']) . '</span>';
+        $list = $view === 'allees'
+            ? Html::table(['Allée', 'Icône', '#Étals', 'Ordre', 'État', ''], array_map(static fn (array $a): array => [
+                $line($a), View::e(self::ICONS[$a['icon']]), (string) $a['stalls'], (string) $a['sort_order'],
                 $a['active'] ? View::badge('Visible', 'ok') : View::badge('Masquée'),
-                View::action('/pro/allees/allee', $a['active'] ? 'Masquer' : 'Afficher', ['id' => $a['id'], 'toggle' => '1'], $a['active'] ? 'Masquer cette allée dans l\'application ?' : null, 'btn ghost'),
+                View::action('/pro/allees/allee', $a['active'] ? 'Masquer' : 'Afficher', ['id' => $a['id'], 'toggle' => '1'], $a['active'] ? 'Masquer cette allée dans l\'application ?' : null, 'btn ghost sm'),
             ], $aisles))
-            . '<div class="card"><h2>Ajouter ou modifier une allée</h2>' . Html::form('/pro/allees/allee', [
-                'id' => ['Identifiant (minuscules, ex. chaussures)', 'text', '', ['attrs' => ' pattern="[a-z0-9-]{2,30}" required']],
+              . '<details class="card new-campaign"><summary>Ajouter ou modifier une allée</summary>' . Html::form('/pro/allees/allee', [
                 'name' => ['Nom affiché', 'text', '', ['attrs' => ' required']],
+                'id' => ['Identifiant (minuscules, ex. chaussures)', 'text', '', ['attrs' => ' pattern="[a-z0-9-]{2,30}" required']],
                 'icon' => ['Icône', 'select', 'other', self::ICONS],
                 'sort_order' => ['Ordre d\'affichage', 'number', '10', null],
-            ], 'Enregistrer l\'allée') . '</div></div>'
-            . '<div><h2>Sites du marché</h2>'
-            . Html::table(['Ordre', 'Site', 'Ville', '#Étals', 'État', ''], array_map(static fn (array $s): array => [
-                (string) $s['sort_order'], '<strong>' . View::e($s['name']) . '</strong><br><span class="muted">' . View::e($s['id']) . '</span>', View::e($s['city']), (string) $s['stalls'],
+            ], 'Enregistrer l\'allée') . '</details>'
+            : Html::table(['Marché', 'Ville', '#Étals', 'Ordre', 'État', ''], array_map(static fn (array $s): array => [
+                $line($s), View::e($s['city']), (string) $s['stalls'], (string) $s['sort_order'],
                 $s['active'] ? View::badge('Actif', 'ok') : View::badge('Inactif'),
-                View::action('/pro/allees/site', $s['active'] ? 'Désactiver' : 'Activer', ['id' => $s['id'], 'toggle' => '1'], $s['active'] ? 'Désactiver ce site ?' : null, 'btn ghost'),
+                View::action('/pro/allees/site', $s['active'] ? 'Désactiver' : 'Activer', ['id' => $s['id'], 'toggle' => '1'], $s['active'] ? 'Désactiver ce marché ?' : null, 'btn ghost sm'),
             ], $sites))
-            . '<div class="card"><h2>Ajouter ou modifier un site</h2>' . Html::form('/pro/allees/site', [
-                'id' => ['Identifiant (minuscules, ex. dantokpa)', 'text', '', ['attrs' => ' pattern="[a-z0-9-]{2,30}" required']],
+              . '<details class="card new-campaign"><summary>Ajouter ou modifier un marché</summary>' . Html::form('/pro/allees/site', [
                 'name' => ['Nom affiché', 'text', '', ['attrs' => ' required']],
+                'id' => ['Identifiant (minuscules, ex. dantokpa)', 'text', '', ['attrs' => ' pattern="[a-z0-9-]{2,30}" required']],
                 'city' => ['Ville', 'text', 'Cotonou', null],
-                'map_url' => ['Plan d\'accès (lien https, facultatif)', 'text', '', null],
                 'sort_order' => ['Ordre d\'affichage', 'number', '10', null],
-            ], 'Enregistrer le site') . '</div></div></div>';
+                'map_url' => ['Plan d\'accès (lien https, facultatif)', 'text', '', null],
+            ], 'Enregistrer le marché') . '</details>';
+        $body = $proposalsHtml . $tabs . $list;
         Html::page('Allées et marchés', $body, 'Les allées et les marchés proposés dans l\'application se gèrent ici.');
     }
 
@@ -83,6 +92,7 @@ final class Market
             View::redirect('/pro/allees', 'Cette proposition a déjà été traitée.', 'err');
         }
         $target = (string) ($_POST['target'] ?? '');
+        $created = $target === 'new';
         if ($target === 'new') {
             $id = trim((string) preg_replace('/[^a-z0-9]+/', '-', strtolower((string) iconv('UTF-8', 'ASCII//TRANSLIT', $proposed))), '-') ?: 'lieu';
             $id = substr($id, 0, 24);
@@ -103,7 +113,16 @@ final class Market
         }
         // Tous les étals qui ont proposé le même nom sont rangés d'un coup
         $col = $aisle ? 'aisle' : 'site';
+        $owners = array_column(Database::all("SELECT DISTINCT user_id FROM stalls WHERE LOWER({$col}_other) = LOWER(?)", [$proposed]), 'user_id');
         $n = Database::run("UPDATE stalls SET {$col}_id = ?, {$col}_other = NULL WHERE LOWER({$col}_other) = LOWER(?)", [$target, $proposed])->rowCount();
+        // Le commerçant est prévenu (application, téléphone et email) : sa proposition ne reste pas sans réponse
+        $word = $aisle ? 'allée' : 'marché';
+        $name = (string) Database::value("SELECT name FROM $table WHERE id = ?", [$target]);
+        foreach ($owners as $owner) {
+            Notifier::send((int) $owner, 'account', $created ? 'Votre proposition est acceptée' : 'Votre étal a été rangé',
+                $created ? "« $proposed » est maintenant dans la liste des {$word}s d'Axi, et votre étal y est rangé." : "« $proposed » n'a pas été ajouté : votre étal est rangé dans « $name ». Vous pouvez le changer dans Modifier mon étal.",
+                ['url' => '/commercant/modifier-etal'], [], true);
+        }
         $req->user = $agent;
         AdminLog::record($req, $col . '.proposal', $col, null, ['proposed' => $proposed, 'target' => $target, 'stalls' => $n]);
         View::redirect('/pro/allees', '« ' . $proposed . ' » : ' . $n . ' étal(s) rangé(s).');
@@ -148,6 +167,6 @@ final class Market
         }
         $req->user = $agent;
         AdminLog::record($req, $table === 'aisles' ? 'aisle.save' : 'site.save', $table === 'aisles' ? 'aisle' : 'site', null, ['id' => $id] + array_diff_key($_POST, ['_csrf' => 1]));
-        View::redirect('/pro/allees', 'Enregistré.');
+        View::redirect('/pro/allees' . ($table === 'sites' ? '?vue=marches' : ''), 'Enregistré.');
     }
 }
