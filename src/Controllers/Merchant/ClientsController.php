@@ -251,33 +251,55 @@ final class ClientsController
     }
 
     /** « Annoncer un arrivage en vocal » aux clients fidèles */
-    /** Modifier le texte d'une de mes annonces d'arrivage : { text } (photo et durée inchangées) */
+    /** Modifier une de mes annonces : { text?, ends_on? } (date de fin dans la limite de la formule) */
     public function updateAnnouncement(Request $req): never
     {
         $a = $this->ownAnnouncement($req);
-        $text = trim((string) (Validator::validate($req->all(), ['text' => 'required|string|max:500'], ['text' => 'Annonce'])['text'] ?? ''));
-        if (mb_strlen($text) < 3) {
-            Validator::fail(['text' => 'Écrivez votre annonce.'], ['text' => 'Annonce']);
+        $in = Validator::validate($req->all(), ['text' => 'string|max:500', 'ends_on' => 'string'], ['text' => 'Annonce', 'ends_on' => 'Date de fin']);
+        $fields = [];
+        if (isset($in['text'])) {
+            $text = trim($in['text']);
+            if (mb_strlen($text) < 3) {
+                Validator::fail(['text' => 'Écrivez votre annonce.'], ['text' => 'Annonce']);
+            }
+            $fields['body'] = $text;
         }
-        Database::run('UPDATE stall_announcements SET body = ? WHERE id = ?', [$text, $a['id']]);
+        if (isset($in['ends_on'])) {
+            $fields['expires_at'] = $this->expiresAt((int) $a['stall_id'], $in['ends_on']);
+        }
+        if ($fields !== []) {
+            Database::updateById('stall_announcements', (int) $a['id'], $fields);
+        }
         Response::ok(Stalls::announcement(Database::one('SELECT * FROM stall_announcements WHERE id = ?', [$a['id']])));
     }
 
-    /** Ajouter ou changer la photo d'une annonce (multipart « photo ») */
-    public function announcementPhoto(Request $req): never
+    /** Ajouter des photos à une annonce (multipart photos[]) dans la limite de la formule (2 ou 5) */
+    public function addAnnouncementPhotos(Request $req): never
     {
         $a = $this->ownAnnouncement($req);
-        $file = $req->file('photo') ?? Validator::fail(['photo' => 'Choisissez une photo.'], ['photo' => 'Photo']);
-        $photo = Uploads::photo($file);
-        Database::run('UPDATE stall_announcements SET photo_path = ?, photo_width = ?, photo_height = ? WHERE id = ?', [$photo['path'], $photo['width'], $photo['height'], $a['id']]);
+        $max = Subscription::announcementLimits((int) $a['stall_id'])['photos'];
+        $existing = (int) Database::value('SELECT COUNT(*) FROM stall_announcement_photos WHERE announcement_id = ?', [$a['id']]);
+        $files = $req->files('photos', 'photo', $max);
+        if ($files === []) {
+            Validator::fail(['photos' => 'Choisissez au moins une photo.'], ['photos' => 'Photos']);
+        }
+        if ($existing + count($files) > $max) {
+            throw new HttpException(422, 'VALIDATION_ERROR', $this->photoLimitMessage((int) $a['stall_id']));
+        }
+        $this->attachAnnouncementPhotos((int) $a['id'], $files, $existing);
         Response::ok(Stalls::announcement(Database::one('SELECT * FROM stall_announcements WHERE id = ?', [$a['id']])));
     }
 
-    /** Retirer la photo d'une annonce (le texte reste) */
+    /** Retirer une photo d'une annonce (par sa position) */
     public function removeAnnouncementPhoto(Request $req): never
     {
         $a = $this->ownAnnouncement($req);
-        Database::run('UPDATE stall_announcements SET photo_path = NULL, photo_width = NULL, photo_height = NULL WHERE id = ?', [$a['id']]);
+        $ids = array_column(Database::all('SELECT id FROM stall_announcement_photos WHERE announcement_id = ? ORDER BY position, id', [$a['id']]), 'id');
+        $index = (int) ($req->params['index'] ?? -1);
+        if (!isset($ids[$index])) {
+            throw new HttpException(404, 'NOT_FOUND', 'Photo introuvable.');
+        }
+        Database::run('DELETE FROM stall_announcement_photos WHERE id = ?', [$ids[$index]]);
         Response::ok(Stalls::announcement(Database::one('SELECT * FROM stall_announcements WHERE id = ?', [$a['id']])));
     }
 
@@ -298,25 +320,69 @@ final class ClientsController
     }
 
     /**
-     * Annonce d'arrivage ÉCRITE (photo facultative), visible 7 jours sur la page de l'étal.
-     * Commerçant abonné : aussi en petite annonce sur l'accueil des clients, et envoyée à ses clients fidèles et abonnés.
+     * Date de fin choisie (AAAA-MM-JJ, heure du Bénin) : obligatoire, à partir d'aujourd'hui et au plus 7 jours
+     * sans abonnement, 30 jours abonné. L'annonce disparaît automatiquement à la fin de ce jour-là.
+     */
+    private function expiresAt(int $stallId, string $endsOn): string
+    {
+        $days = Subscription::announcementLimits($stallId)['days'];
+        $today = Clock::localDate();
+        $last = date('Y-m-d', strtotime($today . " +$days days"));
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $endsOn) || $endsOn < $today || $endsOn > $last) {
+            Validator::fail(['ends_on' => Subscription::active($stallId)
+                ? "Choisissez une date de fin dans les $days prochains jours."
+                : "Sans abonnement, une annonce dure au plus $days jours (30 jours avec l'abonnement)."], ['ends_on' => 'Date de fin']);
+        }
+        return Clock::localDateStart(date('Y-m-d', strtotime($endsOn . ' +1 day')));
+    }
+
+    private function photoLimitMessage(int $stallId): string
+    {
+        $max = Subscription::announcementLimits($stallId)['photos'];
+        return Subscription::active($stallId) ? "$max photos au plus par annonce." : "Sans abonnement, $max photos au plus par annonce (5 avec l'abonnement).";
+    }
+
+    /** @param array<int, array> $files */
+    private function attachAnnouncementPhotos(int $announcementId, array $files, int $start = 0): void
+    {
+        foreach ($files as $i => $file) {
+            $photo = Uploads::photo($file);
+            Database::run(
+                'INSERT INTO stall_announcement_photos (announcement_id, path, width, height, position) VALUES (?, ?, ?, ?, ?)',
+                [$announcementId, $photo['path'], $photo['width'], $photo['height'], $start + $i],
+            );
+        }
+    }
+
+    /**
+     * Annonce d'arrivage ÉCRITE : texte, date de fin OBLIGATOIRE (7 jours au plus, 30 abonné), photos
+     * (2 au plus, 5 abonné). Visible sur la page de l'étal jusqu'à la date de fin ; abonné : aussi en petite
+     * annonce sur l'accueil des clients et envoyée à ses clients fidèles et abonnés.
      */
     public function arrival(Request $req): never
     {
         $stall = Merchant::stall($req);
-        $text = trim((string) (Validator::validate($req->all(), ['text' => 'required|string|max:500'], ['text' => 'Annonce'])['text'] ?? ''));
+        $in = Validator::validate($req->all(), ['text' => 'required|string|max:500', 'ends_on' => 'required|string'], ['text' => 'Annonce', 'ends_on' => 'Date de fin']);
+        $text = trim($in['text']);
         if (mb_strlen($text) < 3) {
             Validator::fail(['text' => 'Écrivez votre annonce.'], ['text' => 'Annonce']);
         }
-        $photo = $req->file('photo') === null ? null : Uploads::photo($req->file('photo'));
-        Database::insert(
-            'INSERT INTO stall_announcements (stall_id, body, photo_path, photo_width, photo_height, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [$stall['id'], $text, $photo['path'] ?? null, $photo['width'] ?? null, $photo['height'] ?? null, Clock::now(), Clock::now(7 * 86400)],
+        $expires = $this->expiresAt((int) $stall['id'], $in['ends_on']);
+        $limits = Subscription::announcementLimits((int) $stall['id']);
+        $files = $req->files('photos', 'photo', 10);
+        if (count($files) > $limits['photos']) {
+            throw new HttpException(422, 'VALIDATION_ERROR', $this->photoLimitMessage((int) $stall['id']));
+        }
+        $id = Database::insert(
+            'INSERT INTO stall_announcements (stall_id, body, created_at, expires_at) VALUES (?, ?, ?, ?)',
+            [$stall['id'], $text, Clock::now(), $expires],
         );
+        $this->attachAnnouncementPhotos($id, $files);
+        $until = date('d/m/Y', strtotime($in['ends_on']));
         if (!Subscription::active((int) $stall['id'])) {
             Response::ok([
                 'recipients' => 0, 'notified' => 0, 'emailed' => 0, 'whatsapp_url' => null, 'share_text' => $text,
-                'message' => 'Annonce publiée sur la page de votre étal pendant 7 jours. Abonnez-vous pour la montrer aussi sur l\'accueil de tous les clients et l\'envoyer à vos clients.',
+                'message' => "Annonce publiée sur la page de votre étal jusqu'au $until. Abonnez-vous pour la montrer aussi sur l'accueil de tous les clients et l'envoyer à vos clients.",
             ]);
         }
         $clients = array_values(array_merge($this->clients((int) $stall['id'], 'loyal'), $this->clients((int) $stall['id'], 'followers')));
@@ -325,7 +391,7 @@ final class ClientsController
             $unique[$c['id']] = $c;
         }
         $result = Broadcaster::send($stall, 'arrival', 'loyal', 'Arrivage chez ' . $stall['name'], $text, array_values($unique));
-        $result['message'] = 'Annonce publiée sur votre étal et sur l\'accueil des clients. ' . $result['message'];
+        $result['message'] = "Annonce publiée sur votre étal et sur l'accueil des clients jusqu'au $until. " . $result['message'];
         Response::ok($result);
     }
 

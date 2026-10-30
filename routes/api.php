@@ -140,8 +140,8 @@ return static function (Router $r): void {
     $r->post('/v1/merchant/arrivals', [ClientsController::class, 'arrival'], $merchant);
     $r->patch('/v1/merchant/announcements/{id}', [ClientsController::class, 'updateAnnouncement'], $merchant);
     $r->delete('/v1/merchant/announcements/{id}', [ClientsController::class, 'deleteAnnouncement'], $merchant);
-    $r->post('/v1/merchant/announcements/{id}/photo', [ClientsController::class, 'announcementPhoto'], $merchant);
-    $r->delete('/v1/merchant/announcements/{id}/photo', [ClientsController::class, 'removeAnnouncementPhoto'], $merchant);
+    $r->post('/v1/merchant/announcements/{id}/photos', [ClientsController::class, 'addAnnouncementPhotos'], $merchant);
+    $r->delete('/v1/merchant/announcements/{id}/photos/{index}', [ClientsController::class, 'removeAnnouncementPhoto'], $merchant);
     $r->get('/v1/merchant/clients', [ClientsController::class, 'index'], $merchant);
     $r->post('/v1/merchant/clients', [ClientsController::class, 'create'], $merchant);
     $r->get('/v1/merchant/clients/lookup', [ClientsController::class, 'lookup'], $merchant);

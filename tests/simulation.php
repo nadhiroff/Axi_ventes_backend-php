@@ -534,10 +534,18 @@ check('discussion supprimée pour moi : absente de ma liste, toujours chez l\'au
 call('POST', "/v1/conversations/$conv/messages", ['body' => 'Encore là ?'], $second);
 $again = call('GET', "/v1/conversations/$conv/messages", null, $client)['body']['data']['messages'] ?? [];
 check('nouveau message : la discussion revient, avec ce message seulement', count($again) === 1 && $again[0]['body'] === 'Encore là ?', json_encode($again));
-$r = call('POST', '/v1/merchant/arrivals', ['text' => 'Arrivage de riz parfumé ce matin !', 'photo' => new CURLFile($photo, 'image/webp')], $second, [], true);
-check('annonce d\'arrivage écrite sans abonnement : sur la page de l\'étal seulement', $r['status'] === 200 && count(call('GET', "/v1/stalls/stl_$secondStall")['body']['data']['stall']['announcements'] ?? []) === 1
+$inEight = date('Y-m-d', strtotime(\Axi\Core\Clock::localDate() . ' +8 days'));
+$inThree = date('Y-m-d', strtotime(\Axi\Core\Clock::localDate() . ' +3 days'));
+check('annonce sans date de fin : refusée', call('POST', '/v1/merchant/arrivals', ['text' => 'Arrivage sans date'], $second, [], true)['status'] === 422);
+check('sans abonnement : date de fin au-delà de 7 jours refusée', call('POST', '/v1/merchant/arrivals', ['text' => 'Arrivage long', 'ends_on' => $inEight], $second, [], true)['status'] === 422);
+check('sans abonnement : 3 photos refusées (2 au plus)', call('POST', '/v1/merchant/arrivals', ['text' => 'Trop de photos', 'ends_on' => $inThree, 'photos[0]' => new CURLFile($photo, 'image/webp'), 'photos[1]' => new CURLFile($photo, 'image/webp'), 'photos[2]' => new CURLFile($photo, 'image/webp')], $second, [], true)['status'] === 422);
+$r = call('POST', '/v1/merchant/arrivals', ['text' => 'Arrivage de riz parfumé ce matin !', 'ends_on' => $inThree, 'photos[0]' => new CURLFile($photo, 'image/webp'), 'photos[1]' => new CURLFile($photo, 'image/webp')], $second, [], true);
+$ann = call('GET', "/v1/stalls/stl_$secondStall")['body']['data']['stall']['announcements'] ?? [];
+check('annonce : 2 photos et date de fin affichées', count($ann[0]['images'] ?? []) === 2 && ($ann[0]['ends_on'] ?? '') === $inThree, json_encode($ann));
+check('annonce d\'arrivage écrite sans abonnement : sur la page de l\'étal seulement', $r['status'] === 200 && count($ann) === 1
     && !in_array("stl_$secondStall", array_column(array_column(call('GET', '/v1/home')['body']['data']['announcements'] ?? [], 'stall'), 'id'), true), $r['raw']);
-call('POST', '/v1/merchant/arrivals', ['text' => 'Nouveaux pagnes wax arrivés'], $merchant, [], true);
+$inThirty = date('Y-m-d', strtotime(\Axi\Core\Clock::localDate() . ' +30 days'));
+check('abonné : annonce jusqu\'à 30 jours acceptée', call('POST', '/v1/merchant/arrivals', ['text' => 'Nouveaux pagnes wax arrivés', 'ends_on' => $inThirty], $merchant, [], true)['status'] === 200);
 $home = call('GET', '/v1/home', null, $client)['body']['data']['announcements'] ?? [];
 check('commerçant abonné : annonce en petite pub sur l\'accueil, badge abonné, bouton suivre', in_array("stl_$stallId", array_column(array_column($home, 'stall'), 'id'), true) && ($home[0]['stall']['subscribed'] ?? false) === true, json_encode($home));
 call('POST', '/v1/stalls/stl_' . $stallId . '/voice-messages', ['audio' => new CURLFile(__DIR__ . '/fixtures/voix.m4a', 'audio/mp4', 'voix.m4a')], $client, [], true);

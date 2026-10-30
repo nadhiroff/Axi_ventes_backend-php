@@ -27,6 +27,8 @@ final class Nightly
             'median_prices' => self::medianPrices(),
             'paused_products' => self::enforceFreeLimits(),
             'expired_messages' => Messaging::purgeExpired(),
+            // Annonces d'arrivage arrivées à leur date de fin : déjà invisibles, effacées après une semaine
+            'expired_announcements' => Database::run('DELETE FROM stall_announcements WHERE expires_at < ?', [Clock::now(-7 * 86400)])->rowCount(),
             'deleted_codes' => Database::run('DELETE FROM email_codes WHERE created_at < ?', [Clock::now(-2 * 86400)])->rowCount(),
         ];
     }

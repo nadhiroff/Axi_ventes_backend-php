@@ -100,10 +100,16 @@ final class Stalls
     /** Annonce d'arrivage : texte, photo facultative, date */
     public static function announcement(array $a): array
     {
+        $images = array_map(static fn (array $p): array => self::image($p['path'], (int) $p['width'], (int) $p['height']),
+            Database::all('SELECT * FROM stall_announcement_photos WHERE announcement_id = ? ORDER BY position, id', [$a['id']]));
+        // Dernier jour d'affichage (heure du Bénin) : l'annonce disparaît à la fin de ce jour
+        $endsOn = (new \DateTimeImmutable($a['expires_at'], new \DateTimeZone('UTC')))->setTimezone(new \DateTimeZone((string) \Axi\Core\Config::get('timezone')))->modify('-1 second')->format('Y-m-d');
         return [
             'id' => Ids::encode('ann', $a['id']),
             'text' => $a['body'],
-            'image' => self::image($a['photo_path'], $a['photo_width'] === null ? null : (int) $a['photo_width'], $a['photo_height'] === null ? null : (int) $a['photo_height']),
+            'image' => $images[0] ?? null,
+            'images' => $images,
+            'ends_on' => $endsOn,
             'created_at' => Clock::iso($a['created_at']),
         ];
     }
