@@ -251,6 +251,34 @@ final class ClientsController
     }
 
     /** « Annoncer un arrivage en vocal » aux clients fidèles */
+    /** Modifier le texte d'une de mes annonces d'arrivage : { text } (photo et durée inchangées) */
+    public function updateAnnouncement(Request $req): never
+    {
+        $a = $this->ownAnnouncement($req);
+        $text = trim((string) (Validator::validate($req->all(), ['text' => 'required|string|max:500'], ['text' => 'Annonce'])['text'] ?? ''));
+        if (mb_strlen($text) < 3) {
+            Validator::fail(['text' => 'Écrivez votre annonce.'], ['text' => 'Annonce']);
+        }
+        Database::run('UPDATE stall_announcements SET body = ? WHERE id = ?', [$text, $a['id']]);
+        Response::ok(Stalls::announcement(Database::one('SELECT * FROM stall_announcements WHERE id = ?', [$a['id']])));
+    }
+
+    /** Supprimer une de mes annonces d'arrivage (elle disparaît de l'étal et de l'accueil) */
+    public function deleteAnnouncement(Request $req): never
+    {
+        $a = $this->ownAnnouncement($req);
+        Database::run('DELETE FROM stall_announcements WHERE id = ?', [$a['id']]);
+        Response::ok(['deleted' => true]);
+    }
+
+    private function ownAnnouncement(Request $req): array
+    {
+        $stall = Merchant::stall($req);
+        $id = $req->id('ann', 'NOT_FOUND', 'Annonce introuvable.');
+        return Database::one('SELECT * FROM stall_announcements WHERE id = ? AND stall_id = ?', [$id, $stall['id']])
+            ?? throw new HttpException(404, 'NOT_FOUND', 'Annonce introuvable.');
+    }
+
     /**
      * Annonce d'arrivage ÉCRITE (photo facultative), visible 7 jours sur la page de l'étal.
      * Commerçant abonné : aussi en petite annonce sur l'accueil des clients, et envoyée à ses clients fidèles et abonnés.
