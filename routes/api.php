@@ -94,6 +94,7 @@ return static function (Router $r): void {
     $r->post('/v1/stalls/{id}/follow', [CatalogController::class, 'follow'], $user);
     $r->delete('/v1/stalls/{id}/follow', [CatalogController::class, 'unfollow'], $user);
     $r->post('/v1/stalls/{id}/voice-messages', [CatalogController::class, 'voiceMessage'], $user);
+    $r->post('/v1/stalls/{id}/email', [CatalogController::class, 'emailStall'], $user);
 
     // Client : panier multi-étals, paiement unique, suivi, réception, litige
     $r->post('/v1/orders/quote', [OrderController::class, 'quote'], Router::OPTIONAL);

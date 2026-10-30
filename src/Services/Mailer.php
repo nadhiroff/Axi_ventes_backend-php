@@ -15,7 +15,8 @@ final class Mailer
     private const TEST_DOMAINS = '/@(example\.(com|net|org)|[^@]+\.(test|invalid|localhost|example))$/i';
 
     /** Renvoie true si l'email est parti (ou volontairement journalisé seulement). */
-    public static function send(string $to, string $subject, string $html, string $text): bool
+    /** $replyTo : adresse à laquelle répond le destinataire (ex. le client qui écrit à un commerçant) */
+    public static function send(string $to, string $subject, string $html, string $text, ?string $replyTo = null, ?string $replyName = null): bool
     {
         if (preg_match(self::TEST_DOMAINS, $to)) {
             Logger::write('mail', "[non envoyé, domaine de test] à $to : $subject");
@@ -36,6 +37,9 @@ final class Mailer
             $mail->CharSet = PHPMailer::CHARSET_UTF8;
             $mail->setFrom($config['from_address'] ?: $config['username'], $config['from_name']);
             $mail->addAddress($to);
+            if ($replyTo !== null) {
+                $mail->addReplyTo($replyTo, $replyName ?? '');
+            }
             $mail->Subject = $subject;
             $mail->isHTML(true);
             $mail->Body = $html;

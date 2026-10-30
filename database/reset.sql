@@ -12,7 +12,7 @@
 SET NAMES utf8mb4;
 SET time_zone = '+00:00';
 SET FOREIGN_KEY_CHECKS = 0;
-DROP TABLE IF EXISTS stall_announcements, reports, message_hidden, stall_photos, messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
+DROP TABLE IF EXISTS stall_emails, stall_announcements, reports, message_hidden, stall_photos, messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
 SET FOREIGN_KEY_CHECKS = 1;
 
 CREATE TABLE schema_migrations (
@@ -960,6 +960,26 @@ FROM stall_follows f JOIN users u ON u.id = f.user_id
 WHERE u.status = 'active';
 
 INSERT INTO schema_migrations (file, applied_at) VALUES ('007_abonnes_dans_fichier_clients.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 008_emails_aux_commercants.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 008 : email envoyé à un commerçant depuis la page de son étal (son adresse reste cachée au client).
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+CREATE TABLE stall_emails (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  stall_id INT UNSIGNED NOT NULL,
+  user_id INT UNSIGNED NOT NULL,
+  subject VARCHAR(150) NOT NULL,
+  created_at DATETIME NOT NULL,
+  KEY idx_stall_emails_user (user_id, created_at),
+  CONSTRAINT fk_stall_emails_stall FOREIGN KEY (stall_id) REFERENCES stalls(id) ON DELETE CASCADE,
+  CONSTRAINT fk_stall_emails_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('008_emails_aux_commercants.sql', UTC_TIMESTAMP());
 
 -- -----------------------------------------------------------------------------
 -- Comptes de test (un par rôle, et un par type de partenaire). Changer les mots de passe en production.
