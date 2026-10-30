@@ -58,7 +58,7 @@ final class Credits
                     'status' => ['Statut', 'select', $c['status'], ['in_review' => 'En étude', 'granted' => 'Accordé', 'declined' => 'Refusé', 'repaid' => 'Remboursé']],
                     'amount' => ['Montant accordé', 'number', (string) ($c['amount'] ?? ''), ['attrs' => ' min="0"']],
                     'note' => ['Note pour le commerçant', 'text', (string) ($c['note'] ?? ''), null],
-                ], 'Enregistrer', 'Enregistrer cette décision ? Le commerçant sera prévenu.');
+                ], 'Mettre à jour', 'La décision sera mise à jour et le commerçant prévenu.');
             }
             return [View::date($c['requested_at'], false), $name . ($isAxi ? '<br><span class="muted">' . View::e($c['org']) . '</span>' : ''), View::e($c['site'] . ' · ' . $c['aisle']),
                 $c['amount_requested'] === null ? '—' : View::fcfa($c['amount_requested']), $c['amount'] === null ? '—' : View::fcfa($c['amount']), View::badge($label, $tone), $decision];
