@@ -1,0 +1,19 @@
+{
+    "name": "axi/backend",
+    "description": "API REST JSON de la plateforme Axi",
+    "type": "project",
+    "require": {
+        "php": ">=8.1",
+        "ext-gd": "*",
+        "ext-pdo_mysql": "*",
+        "phpmailer/phpmailer": "^6.9"
+    },
+    "autoload": {
+        "psr-4": {
+            "Axi\\": "src/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    }
+}

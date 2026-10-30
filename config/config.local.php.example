@@ -1,13 +1,44 @@
 <?php
-// Copier ce fichier en config.local.php puis adapter.
-// Générer app_secret avec : php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
+// Copier ce fichier en config.local.php (même dossier) puis compléter.
+// config.local.php contient les secrets : ne jamais le versionner, ne jamais l'envoyer par email.
+// Hébergement mutualisé : le déposer par FTP ou le gestionnaire de fichiers, droits 640 (ou 600).
+defined('BASE_PATH') || exit;
+
 return [
-    'env' => 'local',
-    'app_secret' => 'REMPLACER_PAR_UNE_CHAINE_ALEATOIRE_DE_64_CARACTERES',
+    // local : codes email aussi écrits dans storage/logs/codes.log, erreurs détaillées
+    // production : sur le serveur en ligne
+    'env' => 'production',
+    // 64 caractères hexadécimaux : php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
+    'app_key' => '',
+    // URL publique de l'API, ex. https://api.axi.bj (nécessaire aux retours de paiement et aux webhooks)
+    'public_url' => '',
     'db' => [
-        'host' => '127.0.0.1',
-        'name' => 'axi',
-        'user' => 'admin',
-        'pass' => 'Admin',
+        'host' => 'localhost',
+        'port' => 3306,
+        'name' => '',
+        'user' => '',
+        'pass' => '',
     ],
+    'mail' => [
+        'host' => 'smtp.gmail.com',
+        'port' => 587,
+        'encryption' => 'tls',
+        'username' => '',
+        // Gmail : « mot de passe d'application » (16 lettres), pas le mot de passe du compte
+        'password' => '',
+        'from_address' => '',
+        'from_name' => 'Axi',
+    ],
+    'payments' => [
+        // fedapay | kkiapay
+        'provider' => 'fedapay',
+        // env : sandbox | live ; webhook_secret : Workbench > Webhooks (en-tête X-FEDAPAY-SIGNATURE)
+        'fedapay' => ['env' => 'sandbox', 'public_key' => '', 'secret_key' => '', 'webhook_secret' => ''],
+        // secret : aussi utilisé pour vérifier l'en-tête x-kkiapay-secret des webhooks
+        'kkiapay' => ['sandbox' => true, 'public_key' => '', 'private_key' => '', 'secret' => ''],
+    ],
+    // Origines web autorisées (Expo web), ex. ['https://app.axi.bj']
+    'cors_origins' => [],
+    // Clé de la tâche planifiée appelée par URL (40 caractères ou plus, au hasard)
+    'cron_key' => '',
 ];
