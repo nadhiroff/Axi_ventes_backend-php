@@ -982,6 +982,17 @@ CREATE TABLE stall_emails (
 INSERT INTO schema_migrations (file, applied_at) VALUES ('008_emails_aux_commercants.sql', UTC_TIMESTAMP());
 
 -- -----------------------------------------------------------------------------
+-- 009_description_produit.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 009 : description d'un produit (matière, taille, couleur, origine…), visible sur sa fiche.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+ALTER TABLE products ADD COLUMN description VARCHAR(1000) NULL AFTER name;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('009_description_produit.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
 -- Comptes de test (un par rôle, et un par type de partenaire). Changer les mots de passe en production.
 -- -----------------------------------------------------------------------------
 INSERT INTO organizations (id, name, type) VALUES (2, 'ANaGeM', 'anagem'), (3, 'Annonceur de test', 'advertiser'), (4, 'IMF de test', 'mfi');
