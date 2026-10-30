@@ -19,7 +19,7 @@ use Axi\Support\Subscription;
 final class Products
 {
     public const MAX_PHOTOS = 5;
-    private const LABELS = ['name' => 'Nom du produit', 'price' => 'Prix', 'price_max' => 'Prix maximum', 'product_ref_id' => 'Référence', 'stock_quantity' => 'Stock'];
+    private const LABELS = ['name' => 'Nom du produit', 'description' => 'Description', 'price' => 'Prix', 'price_max' => 'Prix maximum', 'product_ref_id' => 'Référence', 'stock_quantity' => 'Stock'];
 
     /**
      * POST multipart : photos[] ou photo, name, price (entier ou vide = à débattre), price_max, is_today, in_stock,
@@ -29,6 +29,7 @@ final class Products
     {
         $in = Validator::validate($req->all(), [
             'name' => 'required|string|max:120',
+            'description' => 'string|max:1000',
             'price' => 'int|min:1|maxval:100000000',
             'price_max' => 'int|min:1|maxval:100000000',
             'is_today' => 'bool',
@@ -42,8 +43,8 @@ final class Products
 
         $id = Database::transaction(static function () use ($stallId, $in, $createdBy, $photos): int {
             $id = Database::insert(
-                'INSERT INTO products (stall_id, product_ref_id, name, price_amount, price_max, in_stock, stock_quantity, is_today, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                [$stallId, self::ref($in['product_ref_id'] ?? null), $in['name'], $in['price'] ?? null, $in['price_max'] ?? null,
+                'INSERT INTO products (stall_id, product_ref_id, name, description, price_amount, price_max, in_stock, stock_quantity, is_today, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [$stallId, self::ref($in['product_ref_id'] ?? null), $in['name'], trim((string) ($in['description'] ?? '')) ?: null, $in['price'] ?? null, $in['price_max'] ?? null,
                     (int) ($in['in_stock'] ?? true), $in['stock_quantity'] ?? null, (int) ($in['is_today'] ?? false), $createdBy, Clock::now(), Clock::now()],
             );
             self::attach($id, $photos);
@@ -111,6 +112,7 @@ final class Products
         $body = $req->all();
         $in = Validator::validate($body, [
             'name' => 'string|max:120',
+            'description' => 'string|max:1000',
             'price' => 'int|min:1|maxval:100000000',
             'price_max' => 'int|min:1|maxval:100000000',
             'is_today' => 'bool',
@@ -120,10 +122,10 @@ final class Products
         ], self::LABELS);
 
         $fields = [];
-        foreach (['name' => 'name', 'is_today' => 'is_today', 'in_stock' => 'in_stock', 'stock_quantity' => 'stock_quantity', 'price' => 'price_amount', 'price_max' => 'price_max', 'status' => 'status'] as $key => $column) {
+        foreach (['name' => 'name', 'description' => 'description', 'is_today' => 'is_today', 'in_stock' => 'in_stock', 'stock_quantity' => 'stock_quantity', 'price' => 'price_amount', 'price_max' => 'price_max', 'status' => 'status'] as $key => $column) {
             if (array_key_exists($key, $in)) {
                 $fields[$column] = is_bool($in[$key]) ? (int) $in[$key] : $in[$key];
-            } elseif (in_array($key, ['price', 'price_max', 'stock_quantity'], true) && array_key_exists($key, $body) && ($body[$key] === null || $body[$key] === '')) {
+            } elseif (in_array($key, ['price', 'price_max', 'stock_quantity', 'description'], true) && array_key_exists($key, $body) && ($body[$key] === null || $body[$key] === '')) {
                 // price: null = « Prix à débattre » ; stock_quantity: null = stock non suivi
                 $fields[$column] = null;
             }

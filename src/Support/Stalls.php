@@ -155,6 +155,7 @@ final class Stalls
         return [
             'id' => Ids::encode('prd', $p['id']),
             'name' => $p['name'],
+            'description' => $p['description'] ?? null,
             'image' => $images[0] ?? null,
             'images' => $images,
             'price' => $p['price_amount'] === null ? null : [
