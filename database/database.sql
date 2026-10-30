@@ -991,3 +991,16 @@ INSERT INTO schema_migrations (file, applied_at) VALUES ('008_emails_aux_commerc
 ALTER TABLE products ADD COLUMN description VARCHAR(1000) NULL AFTER name;
 
 INSERT INTO schema_migrations (file, applied_at) VALUES ('009_description_produit.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 010_supprimer_discussion.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 010 : supprimer une discussion « pour moi » (l'autre personne la garde ; elle revient si un nouveau message arrive).
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer).
+-- =============================================================================
+ALTER TABLE conversations
+  ADD COLUMN client_cleared_msg_id INT UNSIGNED NOT NULL DEFAULT 0 AFTER merchant_delivered_msg_id,
+  ADD COLUMN merchant_cleared_msg_id INT UNSIGNED NOT NULL DEFAULT 0 AFTER client_cleared_msg_id;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('010_supprimer_discussion.sql', UTC_TIMESTAMP());
