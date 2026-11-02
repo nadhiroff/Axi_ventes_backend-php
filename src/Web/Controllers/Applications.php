@@ -217,6 +217,53 @@ final class Applications
         View::redirect('/pro/demandes', 'Demande refusée. La personne a été prévenue avec le motif.');
     }
 
+    /**
+     * Documents d'un commerçant (fiche commerçant, fiche utilisateur) : ceux de sa dernière demande, chacun à
+     * voir ou télécharger. Ce qui n'a pas encore été envoyé est signalé (« Pas encore envoyé »).
+     */
+    public static function documentsCard(int $userId): string
+    {
+        $a = Database::one(
+            "SELECT * FROM merchant_applications WHERE user_id = ? ORDER BY status = 'approved' DESC, id DESC LIMIT 1",
+            [$userId],
+        );
+        $owner = (string) Database::value('SELECT name FROM users WHERE id = ?', [$userId]);
+        if ($a === null) {
+            return '<div class="card"><h2>Documents du commerçant</h2><p class="muted">Aucune demande « Devenir commerçant » : ce compte n\'a envoyé ni pièce d\'identité, ni IFU, ni RCCM (étal créé avant les demandes ou par un agent).</p></div>';
+        }
+        $twoSided = $a['id_back_path'] !== null;
+        $docs = [
+            [$twoSided ? 'Pièce d\'identité (recto)' : 'Pièce d\'identité', $a['id_front_path'], 'Piece-identite'],
+            ['Pièce d\'identité (verso)', $a['id_back_path'], 'Piece-identite-verso'],
+            ['Selfie', $a['selfie_path'], 'Selfie'],
+            ['IFU (Identifiant Fiscal Unique)', $a['ifu_path'], 'IFU'],
+            ['RCCM (Registre du Commerce et du Crédit Mobilier)', $a['rccm_path'], 'RCCM'],
+        ];
+        if (!$twoSided) {
+            unset($docs[1]);
+        }
+        $missing = count(array_filter($docs, static fn (array $d): bool => $d[1] === null));
+        $rows = array_map(static function (array $d) use ($owner): array {
+            [$label, $path, $prefix] = $d;
+            if ($path === null) {
+                return [View::e($label), View::badge('Pas encore envoyé', 'warn'), ''];
+            }
+            $view = View::privateFile($path);
+            $download = $view . '&amp;dl=1&amp;n=' . rawurlencode($prefix . '-' . $owner);
+            return [
+                View::e($label),
+                View::badge(str_ends_with($path, '.pdf') ? 'PDF reçu' : 'Photo reçue', 'ok'),
+                '<a class="btn sm ghost" href="' . $view . '" target="_blank" rel="noopener">Voir</a> <a class="btn sm" href="' . $download . '">Télécharger</a>',
+            ];
+        }, array_values($docs));
+        [$status] = self::STATUS[$a['status']];
+        return '<div class="card"><h2>Documents du commerçant' . ($missing > 0 ? ' ' . View::badge($missing . ' manquant' . ($missing > 1 ? 's' : ''), 'warn') : ' ' . View::badge('Complet', 'ok')) . '</h2>'
+            . '<p class="note">Envoyés avec la demande du ' . View::date($a['created_at'], false) . ' (' . View::e($status) . ', ' . View::e(self::ID_TYPES[$a['id_type']] . ' n° ' . $a['id_number']) . '). '
+            . 'Visibles par les agents Axi seulement. <a href="' . View::url('/pro/demandes/' . $a['id']) . '">Ouvrir la demande →</a></p>'
+            . Html::table(['Document', 'État', ''], $rows)
+            . '</div>';
+    }
+
     /** Pièce d'identité, selfie, IFU ou RCCM : servi uniquement à un agent Axi connecté, par un lien lié à sa session */
     public function file(Request $req): never
     {
@@ -231,9 +278,9 @@ final class Applications
         // Seuls deux types sont jamais enregistrés ici : photo WebP ré-encodée, ou PDF vérifié à l'envoi
         $pdf = str_ends_with($file, '.pdf');
         header('Content-Type: ' . ($pdf ? 'application/pdf' : 'image/webp'));
-        if ($pdf) {
-            header('Content-Disposition: inline; filename="document.pdf"');
-        }
+        // dl=1 : téléchargement, sous un nom lisible (ex. « IFU-Afi-Dossou.pdf ») ; sinon ouvert dans le navigateur
+        $name = trim((string) preg_replace('/[^A-Za-z0-9_-]+/', '-', iconv('UTF-8', 'ASCII//TRANSLIT', (string) ($_GET['n'] ?? 'document')) ?: 'document'), '-') ?: 'document';
+        header('Content-Disposition: ' . (($_GET['dl'] ?? '') === '1' ? 'attachment' : 'inline') . '; filename="' . substr($name, 0, 80) . ($pdf ? '.pdf' : '.webp') . '"');
         header('Content-Length: ' . filesize($file));
         header('Cache-Control: private, no-store');
         header('X-Content-Type-Options: nosniff');

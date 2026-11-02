@@ -62,6 +62,8 @@ final class StallController
             }
         }
         Database::updateById('stalls', (int) $stall['id'], $columns + ['updated_at' => Clock::now()]);
+        // Gardé pour les agents Axi : étal renommé, autre numéro, autre emplacement
+        \Axi\Services\ProfileChanges::recordStall($stall, $columns);
         Response::ok($this->payload($req));
     }
 
@@ -72,6 +74,7 @@ final class StallController
         $file = $req->file('photo') ?? Validator::fail(['photo' => 'Choisissez une photo.'], ['photo' => 'Photo']);
         $photo = Uploads::photo($file);
         Database::updateById('stalls', (int) $stall['id'], ['photo_path' => $photo['path'], 'photo_width' => $photo['width'], 'photo_height' => $photo['height'], 'updated_at' => Clock::now()]);
+        \Axi\Services\ProfileChanges::recordStall($stall, ['photo_path' => $photo['path']]);
         Response::ok($this->payload($req));
     }
 

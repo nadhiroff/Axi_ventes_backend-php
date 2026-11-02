@@ -596,7 +596,7 @@ call('POST', '/pro/reglages', ['_csrf' => $csrf, 'v' => ['fee_delivery' => '2000
 check('réglage modifié dans le web → appliqué au devis', (call('POST', '/v1/orders/quote', ['lines' => [['product_id' => "prd_$rice", 'quantity' => 1]], 'reception' => ['mode' => 'delivery', 'detail' => '']])['body']['data']['reception_fee'] ?? 0) === 2000);
 call('POST', '/pro/reglages', ['_csrf' => $csrf, 'v' => ['fee_delivery' => '1500', 'commission_rate' => '7']], null, [], false, true);
 check('commission hors 0/2/3/4 % refusée', Database::value("SELECT v FROM settings WHERE k = 'commission_rate'") === '2');
-call('POST', "/pro/commercants/$stallId/suspendre", ['_csrf' => $csrf], null, [], false, true);
+call('POST', "/pro/commercants/$stallId/suspendre", ['_csrf' => $csrf, 'reason' => 'Suspension de test (simulation).'], null, [], false, true);
 check('commerçant suspendu : étal invisible et jeton révoqué', call('GET', "/v1/stalls/stl_$stallId")['status'] === 404 && call('GET', '/v1/me', null, $merchant)['status'] === 401);
 call('POST', "/pro/commercants/$stallId/activer", ['_csrf' => $csrf], null, [], false, true);
 

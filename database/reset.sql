@@ -12,7 +12,7 @@
 SET NAMES utf8mb4;
 SET time_zone = '+00:00';
 SET FOREIGN_KEY_CHECKS = 0;
-DROP TABLE IF EXISTS payment_duplicates, rate_limits, worker_heartbeats, outbox_jobs, campaign_reports, credit_repayments, sales_hidden, push_tokens, stall_announcement_photos, stall_emails, stall_announcements, reports, message_hidden, stall_photos, messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
+DROP TABLE IF EXISTS profile_changes, payment_duplicates, rate_limits, worker_heartbeats, outbox_jobs, campaign_reports, credit_repayments, sales_hidden, push_tokens, stall_announcement_photos, stall_emails, stall_announcements, reports, message_hidden, stall_photos, messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
 SET FOREIGN_KEY_CHECKS = 1;
 
 CREATE TABLE schema_migrations (
@@ -1323,6 +1323,33 @@ ALTER TABLE merchant_applications
   ADD COLUMN rccm_path VARCHAR(255) NULL AFTER ifu_path;
 
 INSERT INTO schema_migrations (file, applied_at) VALUES ('023_ifu_rccm.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 024_historique_profils.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 024 : historique des modifications de profil et d'étal, pour l'équipe Axi.
+--   Chaque changement de nom, téléphone, présentation, photo de profil, nom d'étal, contacts ou
+--   emplacement est gardé : avant, après, qui (la personne dans l'application ou un agent), quand.
+--   Sert à repérer un vrai nom remplacé par un pseudonyme, ou un étal renommé avec le nom d'un autre.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer), ou php database/migrate.php.
+-- =============================================================================
+CREATE TABLE profile_changes (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id INT UNSIGNED NOT NULL,
+  stall_id INT UNSIGNED NULL,
+  field VARCHAR(40) NOT NULL,
+  old_value VARCHAR(600) NULL,
+  new_value VARCHAR(600) NULL,
+  source ENUM('app','agent') NOT NULL DEFAULT 'app',
+  actor_id INT UNSIGNED NULL,
+  created_at DATETIME NOT NULL,
+  KEY idx_profile_changes_user (user_id, id),
+  KEY idx_profile_changes_recent (field, created_at),
+  CONSTRAINT fk_profile_changes_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('024_historique_profils.sql', UTC_TIMESTAMP());
 
 -- -----------------------------------------------------------------------------
 -- Comptes de test (un par rôle, et un par type de partenaire). Changer les mots de passe en production.

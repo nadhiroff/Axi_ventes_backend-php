@@ -426,12 +426,14 @@ final class AccountController
         $photo = $req->file('photo') ?? \Axi\Core\Validator::fail(['photo' => 'Choisissez une photo.'], ['photo' => 'Photo de profil']);
         $saved = \Axi\Services\Uploads::photo($photo);
         Database::run('UPDATE users SET avatar_path = ? WHERE id = ?', [$saved['path'], $req->userId()]);
+        \Axi\Services\ProfileChanges::record($req->userId(), null, ['avatar' => $req->user['avatar_path']], ['avatar' => $saved['path']]);
         Response::ok(\Axi\Support\Users::presentById($req->userId()));
     }
 
     public function deleteAvatar(Request $req): never
     {
         Database::run('UPDATE users SET avatar_path = NULL WHERE id = ?', [$req->userId()]);
+        \Axi\Services\ProfileChanges::record($req->userId(), null, ['avatar' => $req->user['avatar_path']], ['avatar' => null]);
         Response::ok(\Axi\Support\Users::presentById($req->userId()));
     }
 }
