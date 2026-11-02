@@ -73,7 +73,12 @@ final class Clients
         $disputes = (int) Database::value('SELECT COUNT(*) FROM disputes WHERE client_id = ?', [$u['id']]);
         $logins = Database::all('SELECT * FROM login_events WHERE user_id = ? ORDER BY id DESC LIMIT 10', [$u['id']]);
         $base = '/pro/clients/' . $u['id'];
-        $body = '<div class="row2"><div class="card"><dl><dt>Email</dt><dd>' . View::e($u['email']) . '</dd><dt>Téléphone</dt><dd>' . View::e($u['phone'] ?? '—') . '</dd>'
+        $deletion = Deletions::pendingFor((int) $u['id']);
+        $body = ($deletion !== null
+                ? '<div class="card" style="border-color:var(--danger)"><h2>' . View::badge('Demande de suppression', 'danger') . '</h2><p>Envoyée le ' . View::date($deletion['created_at'])
+                    . '. Raison : <strong>' . View::e((string) $deletion['reason']) . '</strong></p><p><a class="btn sm" href="' . View::url('/pro/suppressions') . '">Traiter dans Suppressions de compte →</a></p></div>'
+                : '')
+            . '<div class="row2"><div class="card"><dl><dt>Email</dt><dd>' . View::e($u['email']) . '</dd><dt>Téléphone</dt><dd>' . View::e($u['phone'] ?? '—') . '</dd>'
             . '<dt>Langue</dt><dd>' . View::e($u['lang']) . '</dd><dt>Inscrit le</dt><dd>' . View::date($u['created_at']) . '</dd><dt>Litiges</dt><dd>' . $disputes . '</dd>'
             . '<dt>Profil</dt><dd>' . ($u['role'] === 'merchant' ? 'Commerçant' : 'Client') . '</dd>'
             . '<dt>Signalements</dt><dd>' . (int) Database::value('SELECT COUNT(*) FROM reports WHERE target_user_id = ?', [$u['id']]) . '</dd>'

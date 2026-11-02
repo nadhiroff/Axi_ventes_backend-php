@@ -250,32 +250,52 @@ final class AccountController
      * Suppression du compte (le mot de passe est redemandé ; l'application demande deux confirmations).
      * Les données personnelles sont effacées ; les commandes restent, anonymes, pour la comptabilité.
      */
+    /**
+     * Demande de suppression du compte : mot de passe ET raison. Rien n'est effacé tout de suite : la demande attend
+     * l'équipe Axi, qui efface définitivement le compte ou annule la demande ; la personne est prévenue dans les deux cas.
+     * Elle peut retirer sa demande tant qu'elle attend (DELETE /v1/me/deletion-request).
+     */
     public function deleteAccount(Request $req): never
     {
-        $in = Validator::validate($req->all(), ['password' => 'required|string|raw|max:200'], ['password' => 'Mot de passe']);
+        $in = Validator::validate($req->all(), ['password' => 'required|string|raw|max:200', 'reason' => 'required|string|max:1000'], ['password' => 'Mot de passe', 'reason' => 'Raison']);
         if (!password_verify($in['password'], $req->user['password_hash'])) {
             throw new HttpException(422, 'VALIDATION_ERROR', 'Mot de passe incorrect.', ['fields' => ['password' => 'Mot de passe incorrect.']]);
         }
-        $userId = $req->userId();
-        $open = Database::value("SELECT COUNT(*) FROM orders WHERE client_id = ? AND status IN ('paid','preparing','on_the_way','disputed')", [$userId]);
-        $merchantOpen = Database::value("SELECT COUNT(*) FROM order_stalls os JOIN stalls s ON s.id = os.stall_id WHERE s.user_id = ? AND os.escrow_state IN ('held','disputed')", [$userId]);
-        if ((int) $open > 0 || (int) $merchantOpen > 0) {
-            throw new HttpException(409, 'OPEN_ORDERS', 'Vous avez des commandes en cours. Attendez leur livraison avant de supprimer votre compte.');
+        $reason = trim((string) $in['reason']);
+        if (mb_strlen($reason) < 10) {
+            Validator::fail(['reason' => 'Expliquez en quelques mots pourquoi vous voulez supprimer votre compte (10 caractères au moins).'], ['reason' => 'Raison']);
         }
-        Database::transaction(static function () use ($userId): void {
-            Database::run(
-                'UPDATE users SET first_name = \'Compte\', last_name = \'supprimé\', name = \'Compte supprimé\', email = ?, phone = NULL, password_hash = ?, status = \'deleted\', deleted_at = ? WHERE id = ?',
-                ['supprime-' . $userId . '@deleted.invalid', password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT), Clock::now(), $userId],
-            );
-            foreach (['user_settings', 'favorites', 'product_views', 'stall_follows', 'notifications', 'push_tokens', 'sales_hidden'] as $table) {
-                Database::run("DELETE FROM $table WHERE user_id = ?", [$userId]);
-            }
-            Database::run('UPDATE data_sharing_consents SET revoked_at = ? WHERE merchant_user_id = ? AND revoked_at IS NULL', [Clock::now(), $userId]);
-            Database::run('UPDATE stalls SET status = \'closed\', phone = NULL, whatsapp = NULL WHERE user_id = ?', [$userId]);
-            Database::run('UPDATE merchant_clients SET user_id = NULL WHERE user_id = ?', [$userId]);
-        });
-        Auth::revokeAll($userId);
-        Response::ok(['deleted' => true]);
+        $userId = $req->userId();
+        if (Database::value("SELECT 1 FROM account_deletion_requests WHERE user_id = ? AND status = 'pending'", [$userId]) !== null) {
+            throw new HttpException(409, 'DELETION_PENDING', 'Votre demande de suppression est déjà en cours d\'examen par l\'équipe Axi.');
+        }
+        Database::insert('INSERT INTO account_deletion_requests (user_id, reason, created_at) VALUES (?, ?, ?)', [$userId, mb_substr($reason, 0, 1000), Clock::now()]);
+        $message = 'Votre demande de suppression a été envoyée à l\'équipe Axi. Elle sera traitée sous 7 jours au plus et vous serez prévenu par email. D\'ici là, votre compte reste utilisable et vous pouvez annuler votre demande.';
+        \Axi\Services\Notifier::send($userId, 'account', 'Demande de suppression reçue', $message, [], [], true);
+        \Axi\Services\Payment\Escrow::alertAgents('Demande de suppression de compte', $req->user['name'] . ' (' . $req->user['email'] . ') demande la suppression de son compte. Raison : ' . mb_substr($reason, 0, 200) . ' — À traiter dans Suppressions.');
+        Response::ok(['status' => 'pending', 'message' => $message, 'request' => self::deletionRequestOf($userId)], 201);
+    }
+
+    /** Ma demande de suppression en attente (ou null) */
+    public function deletionRequest(Request $req): never
+    {
+        Response::ok(['request' => self::deletionRequestOf($req->userId())]);
+    }
+
+    /** Je retire ma demande de suppression tant qu'elle attend */
+    public function cancelDeletionRequest(Request $req): never
+    {
+        $n = Database::run("UPDATE account_deletion_requests SET status = 'withdrawn', decided_at = ? WHERE user_id = ? AND status = 'pending'", [Clock::now(), $req->userId()])->rowCount();
+        if ($n === 0) {
+            throw new HttpException(404, 'NOT_FOUND', 'Aucune demande de suppression en attente.');
+        }
+        Response::ok(['request' => null, 'message' => 'Demande de suppression annulée : votre compte est conservé.']);
+    }
+
+    private static function deletionRequestOf(int $userId): ?array
+    {
+        $r = Database::one("SELECT * FROM account_deletion_requests WHERE user_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1", [$userId]);
+        return $r === null ? null : ['id' => Ids::encode('sup', $r['id']), 'reason' => $r['reason'], 'created_at' => Clock::iso($r['created_at'])];
     }
 
     /** Invitations en attente : des commerçants veulent m'ajouter à leurs clients (j'accepte ou je refuse) */
