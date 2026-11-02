@@ -83,12 +83,22 @@ final class Applications
             . '<dt>Rangée, stand</dt><dd>' . View::e(trim(($a['row_label'] ?? '—') . ', ' . ($a['stand'] ?? '—'))) . '</dd>'
             . '</dl></div>';
 
+        $twoSided = $a['id_back_path'] !== null;
         $photos = '<div class="card"><h2>Pièces et photos</h2><p class="note">Vérifiez que le visage du selfie correspond à la pièce d\'identité, et que la photo montre bien un étal sur un marché. Ces documents ne sont visibles que des agents Axi.</p><div class="photos">'
-            . $photo('Pièce d\'identité (recto)', $a['id_front_path'], true)
+            . $photo($twoSided ? 'Pièce d\'identité (recto)' : 'Pièce d\'identité', $a['id_front_path'], true)
             . $photo('Pièce d\'identité (verso)', $a['id_back_path'], true)
             . $photo('Selfie', $a['selfie_path'], true)
             . $photo('Étal à son emplacement', $a['stall_photo_path'], false)
             . '</div></div>';
+
+        // IFU et RCCM (PDF) : obligatoires depuis la migration 023 ; absents des demandes plus anciennes
+        $doc = static fn (string $caption, ?string $path): string => '<dt>' . View::e($caption) . '</dt><dd>'
+            . ($path === null ? View::badge('Non fourni', 'warn') : '<a href="' . View::privateFile($path) . '" target="_blank" rel="noopener">Ouvrir le PDF</a>')
+            . '</dd>';
+        $photos .= '<div class="card"><h2>Documents de commerçant</h2><p class="note">Vérifiez que le nom sur l\'IFU et le RCCM correspond à la pièce d\'identité.</p><dl>'
+            . $doc('IFU (Identifiant Fiscal Unique)', $a['ifu_path'])
+            . $doc('RCCM (Registre du Commerce et du Crédit Mobilier)', $a['rccm_path'])
+            . '</dl></div>';
 
         $decision = '';
         if ($a['status'] === 'pending') {
@@ -207,7 +217,7 @@ final class Applications
         View::redirect('/pro/demandes', 'Demande refusée. La personne a été prévenue avec le motif.');
     }
 
-    /** Pièce d'identité ou selfie : servi uniquement à un agent Axi connecté, par un lien lié à sa session */
+    /** Pièce d'identité, selfie, IFU ou RCCM : servi uniquement à un agent Axi connecté, par un lien lié à sa session */
     public function file(Request $req): never
     {
         WebAuth::require(['axi']);
@@ -218,7 +228,12 @@ final class Applications
         if (!hash_equals($expected, (string) ($_GET['s'] ?? '')) || $file === false || $root === false || !str_starts_with($file, $root . DIRECTORY_SEPARATOR) || !is_file($file)) {
             throw new HttpException(404, 'NOT_FOUND', 'Fichier introuvable.');
         }
-        header('Content-Type: image/webp');
+        // Seuls deux types sont jamais enregistrés ici : photo WebP ré-encodée, ou PDF vérifié à l'envoi
+        $pdf = str_ends_with($file, '.pdf');
+        header('Content-Type: ' . ($pdf ? 'application/pdf' : 'image/webp'));
+        if ($pdf) {
+            header('Content-Disposition: inline; filename="document.pdf"');
+        }
         header('Content-Length: ' . filesize($file));
         header('Cache-Control: private, no-store');
         header('X-Content-Type-Options: nosniff');

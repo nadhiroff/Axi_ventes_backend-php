@@ -17,6 +17,8 @@ final class Uploads
     private const MAX_AUDIO_BYTES = 3 * 1024 * 1024;
     // Vidéo d'une minute au plus, compressée par le téléphone avant l'envoi
     private const MAX_VIDEO_BYTES = 30 * 1024 * 1024;
+    // Document officiel scanné (IFU, RCCM)
+    private const MAX_PDF_BYTES = 10 * 1024 * 1024;
     private const SIZES = ['thumb' => [200, 15000], 'medium' => [600, 60000]];
 
     /** @return array{path: string, width: int, height: int} chemin relatif à public/, taille de « medium » */
@@ -72,6 +74,30 @@ final class Uploads
             throw new \RuntimeException('Impossible de créer ' . dirname($path));
         }
         imagewebp(self::resize($source, 1280), $path, 80);
+        return $relative;
+    }
+
+    /**
+     * Document PDF PRIVÉ (IFU, RCCM) : le contenu doit être un vrai PDF (signature %PDF- et type détecté), quel
+     * que soit le nom envoyé. Gardé tel quel hors de public/, nom aléatoire ; lu seulement par un agent Axi.
+     * @return string chemin relatif à storage/
+     */
+    public static function privateDocument(array $file, string $folder, string $label): string
+    {
+        self::checkUpload($file, self::MAX_PDF_BYTES, $label);
+        $head = (string) file_get_contents($file['tmp_name'], false, null, 0, 1024);
+        $mime = (string) (new \finfo(FILEINFO_MIME_TYPE))->file($file['tmp_name']);
+        if (!str_contains($head, '%PDF-') || $mime !== 'application/pdf') {
+            throw new HttpException(422, 'INVALID_DOCUMENT', "$label doit être un fichier PDF.");
+        }
+        $relative = 'private/' . $folder . '/' . gmdate('Y/m') . '/' . bin2hex(random_bytes(16)) . '.pdf';
+        $path = BASE_PATH . '/storage/' . $relative;
+        if (!is_dir(dirname($path)) && !mkdir(dirname($path), 0770, true) && !is_dir(dirname($path))) {
+            throw new \RuntimeException('Impossible de créer ' . dirname($path));
+        }
+        if (!move_uploaded_file($file['tmp_name'], $path)) {
+            throw new HttpException(422, 'UPLOAD_FAILED', "$label n'a pas été reçu correctement. Réessayez.");
+        }
         return $relative;
     }
 
