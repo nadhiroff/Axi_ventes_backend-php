@@ -71,7 +71,7 @@ final class Clients
         $u = $this->client((int) ($req->params['id'] ?? 0));
         $orders = Database::all('SELECT * FROM orders WHERE client_id = ? ORDER BY id DESC LIMIT 50', [$u['id']]);
         $disputes = (int) Database::value('SELECT COUNT(*) FROM disputes WHERE client_id = ?', [$u['id']]);
-        $logins = Database::all('SELECT * FROM login_events WHERE user_id = ? ORDER BY id DESC LIMIT 10', [$u['id']]);
+        $logins = Database::all('SELECT * FROM login_events WHERE user_id = ? AND created_at > ? ORDER BY id DESC LIMIT 10', [$u['id'], \Axi\Core\Clock::now(-\Axi\Services\Nightly::LOGIN_HISTORY_DAYS * 86400)]);
         $base = '/pro/clients/' . $u['id'];
         $deletion = Deletions::pendingFor((int) $u['id']);
         $body = ($deletion !== null
@@ -91,7 +91,7 @@ final class Clients
             . '</div>'
             . ($u['role'] === 'merchant' ? self::merchantLinks((int) $u['id']) : '')
             . self::historyCard((int) $u['id'])
-            . '<div class="card"><h2>Dernières connexions</h2>' . Html::table(['Date', 'Résultat', 'Appareil'], array_map(static fn (array $l): array => [View::date($l['created_at']), $l['success'] ? View::badge('Réussie', 'ok') : View::badge('Refusée', 'danger'), View::e($l['device'] ?? '')], $logins)) . '</div>'
+            . '<div class="card"><h2>Dernières connexions (7 jours)</h2>' . Html::table(['Date', 'Résultat', 'Appareil'], array_map(static fn (array $l): array => [View::date($l['created_at']), $l['success'] ? View::badge('Réussie', 'ok') : View::badge('Refusée', 'danger'), View::e($l['device'] ?? '')], $logins), 'Aucune connexion ces 7 derniers jours.') . '</div>'
             . '<h2>Commandes</h2>' . Html::table(['Commande', 'Date', '#Total', 'Statut'], array_map(static fn (array $o): array => [
                 '<a href="' . View::url('/pro/commandes/' . $o['id']) . '">n° ' . (int) $o['id'] . '</a>', View::date($o['created_at']), View::fcfa($o['total']), Orders::orderBadge($o['status']),
             ], $orders), 'Aucune commande.');

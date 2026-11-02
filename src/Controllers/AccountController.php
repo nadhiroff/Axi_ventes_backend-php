@@ -157,10 +157,10 @@ final class AccountController
         Response::ok(['revoked' => true]);
     }
 
-    /** Historique des connexions (30 dernières), réussies et refusées */
+    /** Historique des connexions de la dernière semaine, réussies et refusées (au-delà : effacé par la tâche de nuit) */
     public function loginHistory(Request $req): never
     {
-        $rows = Database::all('SELECT * FROM login_events WHERE user_id = ? ORDER BY id DESC LIMIT 30', [$req->userId()]);
+        $rows = Database::all('SELECT * FROM login_events WHERE user_id = ? AND created_at > ? ORDER BY id DESC LIMIT 20', [$req->userId(), Clock::now(-\Axi\Services\Nightly::LOGIN_HISTORY_DAYS * 86400)]);
         Response::ok(['events' => array_map(static fn (array $e): array => [
             'success' => (bool) $e['success'],
             'label' => $e['success'] ? 'Connexion réussie' : match ($e['reason']) {
@@ -231,7 +231,7 @@ final class AccountController
             'favorites' => Database::all('SELECT p.name, f.created_at FROM favorites f JOIN products p ON p.id = f.product_id WHERE f.user_id = ? ORDER BY f.created_at DESC', [$userId]),
             'consents' => Database::all('SELECT o.name AS partner, c.scope, c.granted_at, c.revoked_at FROM data_sharing_consents c JOIN organizations o ON o.id = c.organization_id WHERE c.merchant_user_id = ? ORDER BY c.id DESC', [$userId]),
             'blocked_users' => Database::all("SELECT CONCAT(u.first_name, ' ', LEFT(u.last_name, 1), '.') AS name, b.created_at FROM user_blocks b JOIN users u ON u.id = b.blocked_id WHERE b.blocker_id = ? ORDER BY b.created_at DESC", [$userId]),
-            'logins' => Database::all('SELECT success, device, ip, created_at FROM login_events WHERE user_id = ? ORDER BY id DESC LIMIT 200', [$userId]),
+            'logins' => Database::all('SELECT success, device, ip, created_at FROM login_events WHERE user_id = ? AND created_at > ? ORDER BY id DESC LIMIT 200', [$userId, Clock::now(-\Axi\Services\Nightly::LOGIN_HISTORY_DAYS * 86400)]),
         ];
     }
 

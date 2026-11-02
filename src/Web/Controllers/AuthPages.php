@@ -105,7 +105,7 @@ final class AuthPages
     public function account(Request $req): never
     {
         $user = WebAuth::require();
-        $logins = Database::all('SELECT * FROM login_events WHERE user_id = ? ORDER BY id DESC LIMIT 15', [$user['id']]);
+        $logins = Database::all('SELECT * FROM login_events WHERE user_id = ? AND created_at > ? ORDER BY id DESC LIMIT 30', [$user['id'], \Axi\Core\Clock::now(-\Axi\Services\Nightly::LOGIN_HISTORY_DAYS * 86400)]);
         $body = '<div class="row2"><div class="card"><h2>Mes informations</h2><dl>'
             . '<dt>Nom</dt><dd>' . View::e($user['name']) . '</dd><dt>Email</dt><dd>' . View::e($user['email']) . '</dd>'
             . '<dt>Organisation</dt><dd>' . View::e($user['org_name']) . ' (' . View::e(Users::PARTNER_TYPES[$user['partner_type']]) . ')</dd></dl></div>'
@@ -115,10 +115,10 @@ final class AuthPages
                 'new_password' => ['Nouveau mot de passe', 'password', '', ['hint' => '8 caractères minimum.', 'attrs' => ' minlength="8" autocomplete="new-password" required']],
                 'new_password_confirmation' => ['Confirmer le nouveau mot de passe', 'password', '', ['attrs' => ' minlength="8" autocomplete="new-password" required']],
             ], 'Changer le mot de passe', 'Votre mot de passe sera remplacé.') . '</div></div>'
-            . Html::title('Historique des connexions')
+            . Html::title('Historique des connexions (7 derniers jours)')
             . Html::table(['Date', 'Résultat', 'Canal', 'Adresse IP'], array_map(static fn (array $l): array => [
                 View::date($l['created_at']), $l['success'] ? View::badge('Réussie', 'ok') : View::badge('Refusée', 'danger'), View::e($l['channel']), View::e($l['ip']),
-            ], $logins));
+            ], $logins), 'Aucune connexion ces 7 derniers jours.');
         Html::page('Mon compte', $body);
     }
 
