@@ -515,6 +515,8 @@ final class ClientsController
                 },
                 'created_at' => Clock::iso($last['created_at']),
             ],
+            // Messages du client pas encore lus par le commerçant : la ligne est mise en évidence, comme dans WhatsApp
+            'unread_count' => $last === null ? 0 : (int) $last['unread'],
         ];
     }
 
@@ -528,7 +530,11 @@ final class ClientsController
     private function lastMessages(int $stallId): array
     {
         $rows = Database::all(
-            'SELECT c.client_id, c.client_read_msg_id, c.client_delivered_msg_id, m.id, m.kind, m.body, m.sender_id, m.created_at, m.deleted_at FROM conversations c
+            'SELECT c.client_id, c.client_read_msg_id, c.client_delivered_msg_id, m.id, m.kind, m.body, m.sender_id, m.created_at, m.deleted_at,
+                    (SELECT COUNT(*) FROM messages u WHERE u.conversation_id = c.id AND u.sender_id = c.client_id AND u.deleted_at IS NULL
+                       AND u.id > GREATEST(COALESCE(c.merchant_read_msg_id, 0), COALESCE(c.merchant_cleared_msg_id, 0))
+                       AND (u.expires_at IS NULL OR u.expires_at > UTC_TIMESTAMP())) AS unread
+             FROM conversations c
              JOIN messages m ON m.id = (
                SELECT MAX(m2.id) FROM messages m2 WHERE m2.conversation_id = c.id AND m2.id > COALESCE(c.merchant_cleared_msg_id, 0)
                AND (m2.expires_at IS NULL OR m2.expires_at > UTC_TIMESTAMP()))

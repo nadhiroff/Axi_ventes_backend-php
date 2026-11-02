@@ -142,6 +142,20 @@ foreach (call('GET', '/v1/conversations', null, $mToken)['body']['data']['conver
 }
 check('liste des discussions : même dernier message et même état « vu »', ($clientSide['preview'] ?? '') === 'Oui, il en reste trois.' && ($clientSide['status'] ?? '') === 'read', json_encode($clientSide));
 
+$unreadOf = static function () use ($mToken, $cId): ?int {
+    foreach (call('GET', '/v1/merchant/clients', null, $mToken)['body']['data']['clients'] ?? [] as $c) {
+        if (($c['user_id'] ?? '') === "usr_$cId") {
+            return $c['unread_count'] ?? null;
+        }
+    }
+    return null;
+};
+call('POST', "/v1/conversations/$conv/messages", ['body' => 'Je passe demain matin.'], $cToken);
+call('POST', "/v1/conversations/$conv/messages", ['body' => 'Vous ouvrez à quelle heure ?'], $cToken);
+check('message de la cliente pas encore lu : « Mes clients » compte 2 non lus', $unreadOf() === 2, var_export($unreadOf(), true));
+call('GET', "/v1/conversations/$conv/messages", null, $mToken);
+check('le commerçant ouvre la discussion : plus aucun non lu dans la liste', $unreadOf() === 0, var_export($unreadOf(), true));
+
 section('1. La cliente bloque le commerçant');
 $r = call('POST', "/v1/users/$merchantUserId/block", [], $cToken);
 check('blocage accepté', $r['status'] === 200 && ($r['body']['data']['blocked'] ?? false) === true, $r['raw']);

@@ -158,8 +158,13 @@ final class MessagesController
                 'INSERT INTO messages (conversation_id, sender_id, kind, body, file_path, file_width, file_height, reply_to_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 [$c['id'], $me, $kind, $body === '' ? null : $body, $path, $width, $height, $replyTo, $now, Messaging::expiresAt($c)],
             );
-            $mine = (int) $c['client_id'] === $me ? 'client_read_at' : 'merchant_read_at';
-            Database::run("UPDATE conversations SET last_message_at = ?, $mine = ? WHERE id = ?", [$now, $now, $c['id']]);
+            // Répondre vaut lecture (comme WhatsApp) : date ET repère de lecture, pour que les compteurs de non lus
+            // (liste des discussions, « Mes clients », pastilles) tombent à zéro pour cette discussion
+            $side = (int) $c['client_id'] === $me ? 'client' : 'merchant';
+            Database::run(
+                "UPDATE conversations SET last_message_at = ?, {$side}_read_at = ?, {$side}_read_msg_id = GREATEST({$side}_read_msg_id, ?) WHERE id = ?",
+                [$now, $now, $id, $c['id']],
+            );
             return $id;
         });
         $this->pushMessage($c, $me, $kind, $body);
