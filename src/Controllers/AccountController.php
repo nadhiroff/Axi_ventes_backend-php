@@ -339,8 +339,8 @@ final class AccountController
         $rows = Database::all(
             'SELECT p.*, s.name AS stall_name, s.verified_at AS stall_verified_at FROM favorites f
              JOIN products p ON p.id = f.product_id JOIN stalls s ON s.id = p.stall_id
-             WHERE f.user_id = ? AND ' . Stalls::VISIBLE . ' AND s.status = \'active\' ORDER BY f.created_at DESC LIMIT 100',
-            [$req->userId()],
+             WHERE f.user_id = ? AND ' . Stalls::VISIBLE . ' AND s.status = \'active\' AND ' . \Axi\Support\Blocks::excludeSql('s.user_id')[0] . ' ORDER BY f.created_at DESC LIMIT 100',
+            [$req->userId(), ...\Axi\Support\Blocks::excludeSql('s.user_id')[1]],
         );
         Response::ok(['products' => $this->withStall($rows)]);
     }
@@ -364,8 +364,8 @@ final class AccountController
         $rows = Database::all(
             'SELECT p.*, s.name AS stall_name, s.verified_at AS stall_verified_at FROM product_views v
              JOIN products p ON p.id = v.product_id JOIN stalls s ON s.id = p.stall_id
-             WHERE v.user_id = ? AND ' . Stalls::VISIBLE . ' AND s.status = \'active\' ORDER BY v.viewed_at DESC LIMIT 30',
-            [$req->userId()],
+             WHERE v.user_id = ? AND ' . Stalls::VISIBLE . ' AND s.status = \'active\' AND ' . \Axi\Support\Blocks::excludeSql('s.user_id')[0] . ' ORDER BY v.viewed_at DESC LIMIT 30',
+            [$req->userId(), ...\Axi\Support\Blocks::excludeSql('s.user_id')[1]],
         );
         Response::ok(['products' => $this->withStall($rows)]);
     }
@@ -382,7 +382,8 @@ final class AccountController
     private function activeProduct(Request $req): int
     {
         $id = $req->id('prd', 'PRODUCT_NOT_FOUND', 'Produit introuvable.');
-        if (Database::value('SELECT id FROM products WHERE id = ? AND status = \'active\'', [$id]) === null) {
+        [$notBlocked, $blockedIds] = \Axi\Support\Blocks::excludeSql('s.user_id');
+        if (Database::value('SELECT p.id FROM products p JOIN stalls s ON s.id = p.stall_id WHERE p.id = ? AND p.status = \'active\' AND ' . $notBlocked, [$id, ...$blockedIds]) === null) {
             throw new HttpException(404, 'PRODUCT_NOT_FOUND', 'Ce produit n\'existe pas ou a été supprimé.');
         }
         return $id;

@@ -12,7 +12,7 @@
 SET NAMES utf8mb4;
 SET time_zone = '+00:00';
 SET FOREIGN_KEY_CHECKS = 0;
-DROP TABLE IF EXISTS profile_changes, payment_duplicates, rate_limits, worker_heartbeats, outbox_jobs, campaign_reports, credit_repayments, sales_hidden, push_tokens, stall_announcement_photos, stall_emails, stall_announcements, reports, message_hidden, stall_photos, messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
+DROP TABLE IF EXISTS user_blocks, profile_changes, payment_duplicates, rate_limits, worker_heartbeats, outbox_jobs, campaign_reports, credit_repayments, sales_hidden, push_tokens, stall_announcement_photos, stall_emails, stall_announcements, reports, message_hidden, stall_photos, messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
 SET FOREIGN_KEY_CHECKS = 1;
 
 CREATE TABLE schema_migrations (
@@ -1350,6 +1350,28 @@ CREATE TABLE profile_changes (
 ) ENGINE=InnoDB;
 
 INSERT INTO schema_migrations (file, applied_at) VALUES ('024_historique_profils.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 025_blocages_utilisateurs.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 025 : un client ou un commerçant peut bloquer un autre utilisateur qui le dérange (sans passer par l'équipe Axi).
+--   Tant que le blocage dure, les deux ne se voient plus nulle part : discussion, profil, étal, produits,
+--   recherche, accueil, fichier clients, messages groupés ; aucun message ni commande de l'un à l'autre.
+--   Les commandes déjà passées restent consultables (argent engagé). Débloquer rétablit tout.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer), ou php database/migrate.php.
+-- =============================================================================
+CREATE TABLE user_blocks (
+  blocker_id INT UNSIGNED NOT NULL,
+  blocked_id INT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL,
+  PRIMARY KEY (blocker_id, blocked_id),
+  KEY idx_user_blocks_blocked (blocked_id, blocker_id),
+  CONSTRAINT fk_user_blocks_blocker FOREIGN KEY (blocker_id) REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_user_blocks_blocked FOREIGN KEY (blocked_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('025_blocages_utilisateurs.sql', UTC_TIMESTAMP());
 
 -- -----------------------------------------------------------------------------
 -- Comptes de test (un par rôle, et un par type de partenaire). Changer les mots de passe en production.
