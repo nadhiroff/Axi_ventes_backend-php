@@ -507,6 +507,12 @@ final class ClientsController
             'last_message' => $last === null ? null : [
                 'preview' => $last['deleted_at'] !== null ? '🚫 Message supprimé' : match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', 'video' => '🎥 Vidéo', default => mb_substr((string) $last['body'], 0, 80) },
                 'mine' => (int) $last['sender_id'] !== (int) $c['user_id'],
+                // Coches du dernier message envoyé par le commerçant : ✓ envoyé, ✓✓ reçu, ✓✓ bleu vu par le client
+                'status' => (int) $last['sender_id'] === (int) $c['user_id'] ? null : match (true) {
+                    (int) $last['client_read_msg_id'] >= (int) $last['id'] => 'read',
+                    (int) $last['client_delivered_msg_id'] >= (int) $last['id'] => 'delivered',
+                    default => 'sent',
+                },
                 'created_at' => Clock::iso($last['created_at']),
             ],
         ];
@@ -522,7 +528,7 @@ final class ClientsController
     private function lastMessages(int $stallId): array
     {
         $rows = Database::all(
-            'SELECT c.client_id, m.kind, m.body, m.sender_id, m.created_at, m.deleted_at FROM conversations c
+            'SELECT c.client_id, c.client_read_msg_id, c.client_delivered_msg_id, m.id, m.kind, m.body, m.sender_id, m.created_at, m.deleted_at FROM conversations c
              JOIN messages m ON m.id = (
                SELECT MAX(m2.id) FROM messages m2 WHERE m2.conversation_id = c.id AND m2.id > COALESCE(c.merchant_cleared_msg_id, 0)
                AND (m2.expires_at IS NULL OR m2.expires_at > UTC_TIMESTAMP()))
