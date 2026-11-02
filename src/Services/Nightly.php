@@ -15,6 +15,9 @@ use Axi\Services\Payment\Escrow;
  */
 final class Nightly
 {
+    /** Jours d'historique de connexion gardés ; au-delà, effacé chaque nuit et jamais affiché */
+    public const LOGIN_HISTORY_DAYS = 7;
+
     /** @return array<string, int> résumé de ce qui a été fait */
     public static function run(): array
     {
@@ -30,6 +33,8 @@ final class Nightly
             // Annonces d'arrivage arrivées à leur date de fin : déjà invisibles, effacées après une semaine
             'expired_announcements' => Database::run('DELETE FROM stall_announcements WHERE expires_at < ?', [Clock::now(-7 * 86400)])->rowCount(),
             'deleted_codes' => Database::run('DELETE FROM email_codes WHERE created_at < ?', [Clock::now(-2 * 86400)])->rowCount(),
+            // Historique de connexion : une semaine seulement (application et espace partenaire)
+            'old_logins' => Database::run('DELETE FROM login_events WHERE created_at < ?', [Clock::now(-self::LOGIN_HISTORY_DAYS * 86400)])->rowCount(),
         ];
     }
 
