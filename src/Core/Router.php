@@ -60,6 +60,8 @@ final class Router
             }
 
             $request->params = array_filter($matches, 'is_string', ARRAY_FILTER_USE_KEY);
+            // Avant toute lecture du jeton en base : un robot ou une boucle est arrêté au plus tôt
+            RateLimiter::check($request);
             if ($route['access'] === self::OPTIONAL) {
                 Auth::attempt($request);
             } elseif ($route['access'] !== null) {

@@ -63,6 +63,36 @@ En local, exposer le port 8000 avec un tunnel, par exemple `cloudflared tunnel -
 - KkiaPay (tableau de bord > Webhooks) : `https://<tunnel>/v1/webhooks/kkiapay` (vérifié avec la clé `secret`).
 Sans webhook, la vérification se fait au retour de la page, depuis le suivi de commande, depuis l'espace
 partenaire (« Vérifier », « Réconcilier ») et par la tâche planifiée.
+**FedaPay : décocher « Disable the webhook when the application generates errors »** dans le tableau de bord,
+sinon un incident de quelques minutes coupe toutes les notifications suivantes.
+
+### Fiabilité des paiements (jamais deux débits, jamais un paiement perdu)
+
+- **Webhook** : signature vérifiée, événement enregistré (`webhook_events`), réponse 200 immédiate. Le worker
+  revérifie auprès de la passerelle et rejoue l'événement (10 s, 1 min, 5 min… jusqu'à 3 h) tant qu'elle ne répond pas.
+- **Emails et notifications du téléphone** : mis en file (`outbox_jobs`), envoyés et réessayés par le worker.
+- **Pas d'annulation sans preuve** : passerelle injoignable = la commande n'est pas annulée (client : erreur 503
+  « réessayez » ; tâche planifiée : nouvel essai plus tard).
+- **Paiement arrivé après l'annulation** : commande réactivée si le stock est encore là, sinon litige automatique
+  (argent bloqué chez Axi, agents prévenus, remboursement depuis Litiges).
+- **Payé deux fois pour la même référence** (KkiaPay) : la page ne rouvre pas le paiement pendant la vérification ;
+  une deuxième transaction réussie est remboursée automatiquement (`payment_duplicates`).
+- **Versements aux commerçants** : un seul à la fois par étal, parts réservées avant l'appel à la passerelle.
+- **Interblocages MySQL** : transaction rejouée (3 essais) ; les produits sont réservés toujours dans le même ordre.
+- **Limite de requêtes** : 600/min par IP, 300/min par session (`rate_limit`), jamais sur les webhooks. Derrière un
+  répartiteur ou un CDN, déclarer ses adresses dans `trusted_proxies`.
+
+Tests de pannes : `php tests/payments_reliability.php` (passerelle coupée, paiement tardif, double paiement,
+versements simultanés, interblocage, limite de requêtes).
+
+### Worker
+
+```bash
+php cron/worker.php --forever        # serveur : service systemd (Restart=always)
+php cron/worker.php                  # hébergement mutualisé : tâche cron chaque minute (* * * * *), tourne 55 s
+```
+`npm run dev` (application) le lance aussi. Sans worker actif depuis 2 minutes, chaque requête traite elle-même
+ses tâches après sa réponse : plus lent, mais rien ne se perd.
 
 Remboursements : KkiaPay rembourse la totalité par API ; FedaPay ne propose pas de remboursement par API
 (il est enregistré « en attente » et se fait dans son tableau de bord). Versements aux commerçants : simulés et
@@ -77,8 +107,12 @@ enregistrés en sandbox, envoyés par l'API FedaPay en production.
    passerelles, `public_url`, `cron_key`. Droits 640.
 4. Envoyer tout le dossier par FTP (`vendor/` compris). Idéalement, le domaine pointe sur `public/`.
 5. Droits d'écriture : `storage/logs/`, `storage/audio/`, `public/uploads/`.
-6. Tâche planifiée (cPanel, toutes les 15 min) : `wget -qO- "https://<domaine>/v1/internal/cron?key=<cron_key>"`
+6. Tâche planifiée (cPanel, toutes les 15 min) : `wget -qO- --header="X-Cron-Key: <cron_key>" "https://<domaine>/v1/internal/cron"`
    (vérification des paiements, relance de paiement, annulations, libération automatique, rappels, prix médians).
+   La clé dans l'adresse (`?key=`) marche encore mais finit dans les journaux du serveur : préférez l'en-tête.
+7. Worker chaque minute : `php /chemin/cron/worker.php` (voir « Worker »).
+8. **Le domaine DOIT pointer sur `public/`** (ou `AllowOverride All` actif, voir `deploy/apache-axi.conf`) : sinon
+   Apache sert `.git/`, `storage/logs/` (codes de vérification) et `database/`.
 
 ## Structure
 
