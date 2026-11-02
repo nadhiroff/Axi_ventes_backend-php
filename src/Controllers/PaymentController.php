@@ -11,6 +11,7 @@ use Axi\Core\Response;
 use Axi\Core\Url;
 use Axi\Services\Payment\Escrow;
 use Axi\Services\Payment\Gateways;
+use Axi\Services\Jobs;
 use Axi\Services\Payment\KkiapayGateway;
 use Axi\Services\SignedUrl;
 
@@ -28,6 +29,18 @@ final class PaymentController
         $payment = Database::one('SELECT p.*, u.name, u.email FROM payments p JOIN users u ON u.id = p.user_id WHERE p.reference = ?', [$ref]);
         if ($payment === null || $payment['status'] !== 'pending') {
             $this->page('Paiement déjà traité', 'Ce paiement n\'est plus en attente. Revenez dans l\'application Axi.', $ref);
+        }
+        // Un paiement a déjà été validé dans cette page : on vérifie, et on ne rouvre JAMAIS le paiement tant
+        // que ce n'est pas tranché (sinon le client pourrait être débité deux fois)
+        if ($payment['claimed_provider_ref'] !== null || $payment['provider_ref'] !== null) {
+            $after = Escrow::refresh((int) $payment['id'], 'gateway');
+            if ($after['status'] !== 'pending' || $after['claimed_provider_ref'] !== null || $after['provider_ref'] !== null) {
+                $this->page(
+                    $after['status'] === 'paid' ? 'Paiement reçu' : 'Paiement en cours de vérification',
+                    $after['status'] === 'paid' ? 'Merci ! Revenez dans l\'application Axi.' : 'Votre paiement est en cours de vérification. Ne payez pas une seconde fois : revenez dans l\'application, le statut se mettra à jour seul.',
+                    $after['order_id'] !== null ? 'cmd_' . $after['order_id'] : null,
+                );
+            }
         }
         $gateway = Gateways::get('kkiapay');
         assert($gateway instanceof KkiapayGateway);
@@ -83,7 +96,7 @@ HTML;
         }
         [$title, $text] = match ($payment['status']) {
             'paid' => ['Paiement reçu', 'Merci ! L\'argent reste chez Axi jusqu\'à ce que vous confirmiez la réception. Revenez dans l\'application.'],
-            'pending' => ['Paiement en cours de vérification', 'Revenez dans l\'application : le statut se mettra à jour dans quelques instants.'],
+            'pending' => ['Paiement en cours de vérification', 'Ne payez pas une seconde fois : revenez dans l\'application, le statut se mettra à jour dans quelques instants.'],
             default => ['Paiement non abouti', 'Aucun montant n\'a été prélevé. Revenez dans l\'application pour réessayer.'],
         };
         $this->page($title, $text, $payment['order_id'] !== null ? 'cmd_' . $payment['order_id'] : null);
@@ -103,9 +116,18 @@ HTML;
      * Webhook : signature vérifiée, événement dédoublonné (webhook_events), puis statut vérifié auprès de la
      * passerelle. Un même événement reçu deux fois ne crée jamais deux paiements.
      */
+    /**
+     * Webhook : signature vérifiée, événement enregistré, réponse 200 immédiate. Rien d'autre ici : la
+     * vérification auprès de la passerelle, les emails et notifications sont faits par le worker
+     * (WebhookProcessor), qui rejoue l'événement jusqu'au succès. Un événement reçu deux fois n'est enregistré
+     * qu'une fois ; une base injoignable répond une erreur 5xx pour que la passerelle renvoie l'événement plus tard.
+     */
     private function webhook(string $provider, Request $req): never
     {
         $raw = (string) file_get_contents('php://input');
+        if (strlen($raw) > 65536) {
+            Response::error('PAYLOAD_TOO_LARGE', 'Événement trop volumineux.', 413);
+        }
         $headers = [];
         foreach ($_SERVER as $k => $v) {
             if (str_starts_with($k, 'HTTP_')) {
@@ -114,25 +136,21 @@ HTML;
         }
         $event = Gateways::get($provider)->parseWebhook($headers, $raw);
         if ($event === null) {
-            Logger::write('payments', "WEBHOOK $provider REFUSÉ (signature invalide)");
+            Logger::write('security', "WEBHOOK $provider REFUSÉ (signature invalide) depuis " . $req->ip());
             Response::error('INVALID_SIGNATURE', 'Signature invalide.', 401);
         }
-        try {
-            Database::run('INSERT INTO webhook_events (provider, event_key, payload, received_at) VALUES (?, ?, ?, ?)', [$provider, mb_substr($event['key'], 0, 190), $raw, Clock::now()]);
-        } catch (\PDOException $e) {
-            if ($e->getCode() === '23000') {
-                Response::ok(['duplicate' => true]);
-            }
-            throw $e;
+        $ref = static fn (mixed $v, int $max): ?string => is_scalar($v) && (string) $v !== '' ? mb_substr((string) $v, 0, $max) : null;
+        $now = Clock::now();
+        Database::run(
+            'INSERT IGNORE INTO webhook_events (provider, event_key, provider_ref, reference, claims_paid, payload, received_at, next_attempt_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [$provider, mb_substr($event['key'], 0, 190), $ref($event['provider_ref'], 80), $ref($event['reference'], 40),
+                isset($event['paid']) ? (int) $event['paid'] : null, $raw, $now, $now],
+        );
+        $id = (int) Database::pdo()->lastInsertId();
+        if ($id === 0) {
+            Response::ok(['received' => true, 'duplicate' => true]);
         }
-        $payment = $event['provider_ref'] !== null ? Database::one('SELECT * FROM payments WHERE provider = ? AND provider_ref = ?', [$provider, $event['provider_ref']]) : null;
-        $payment ??= $event['reference'] !== null ? Database::one('SELECT * FROM payments WHERE reference = ?', [$event['reference']]) : null;
-        $result = 'unknown_payment';
-        if ($payment !== null) {
-            $after = Escrow::refresh((int) $payment['id'], 'gateway', null, $provider === 'kkiapay' ? $event['provider_ref'] : null);
-            $result = 'status:' . $after['status'];
-        }
-        Database::run('UPDATE webhook_events SET processed_at = ?, result = ? WHERE provider = ? AND event_key = ?', [Clock::now(), $result, $provider, mb_substr($event['key'], 0, 190)]);
+        Jobs::webhookReceived($id);
         Response::ok(['received' => true]);
     }
 

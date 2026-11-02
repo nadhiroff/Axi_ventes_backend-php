@@ -38,6 +38,8 @@ interface Gateway
      * @return array{key: string, provider_ref: ?string, reference: ?string}|null
      */
     public function parseWebhook(array $headers, string $rawBody): ?array;
+    // Clé facultative 'paid' (?bool) : ce que l'événement annonce. Jamais cru tel quel : il sert seulement à
+    // repérer une deuxième transaction réussie pour une même référence ; le statut est toujours revérifié.
 
     public function isSandbox(): bool;
 }

@@ -33,6 +33,10 @@ if ($origin !== '' && in_array($origin, Config::get('cors_origins', []), true)) 
 }
 header('Vary: Origin', false);
 header('X-Content-Type-Options: nosniff');
+// En HTTPS : le téléphone et le navigateur refusent ensuite toute connexion non chiffrée à ce domaine (1 an)
+if (($_SERVER['HTTPS'] ?? '') === 'on' || ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https') {
+    header('Strict-Transport-Security: max-age=31536000');
+}
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
     http_response_code(204);
     exit;

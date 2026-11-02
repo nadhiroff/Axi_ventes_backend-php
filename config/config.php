@@ -41,6 +41,20 @@ $config = [
     'cors_origins' => [],
     // Clé de l'URL de la tâche planifiée (/v1/internal/cron?key=…), pour les hébergements sans SSH
     'cron_key' => '',
+    // Adresses de NOS relais (répartiteur de charge, CDN) : seulement eux peuvent indiquer l'IP du client
+    'trusted_proxies' => [],
+    // Requêtes par minute. Par IP : large (opérateurs mobiles et Wi-Fi de marché partagent une adresse).
+    // Par session : l'application normale en fait moins de 60 ; 0 = pas de limite.
+    'rate_limit' => [
+        'enabled' => true,
+        'per_ip_per_minute' => 600,
+        'per_session_per_minute' => 300,
+    ],
+    // Emails, notifications du téléphone et webhooks : traités par cron/worker.php. Si aucun worker n'a
+    // donné signe de vie depuis 'worker_timeout_seconds', chaque requête traite elle-même ses tâches.
+    'jobs' => [
+        'worker_timeout_seconds' => 120,
+    ],
     'auth' => [
         'token_ttl_days' => 90,
         'password_min' => 8,
