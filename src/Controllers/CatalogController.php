@@ -159,7 +159,9 @@ final class CatalogController
     private function stallId(Request $req): int
     {
         $id = $req->id('stl', 'STALL_NOT_FOUND', self::STALL_NOT_FOUND);
-        if (Database::value('SELECT id FROM stalls WHERE id = ? AND status = \'active\'', [$id]) === null) {
+        $owner = Database::value('SELECT user_id FROM stalls WHERE id = ? AND status = \'active\'', [$id]);
+        // Commerçant bloqué (ou qui m'a bloqué) : ni suivi, ni message vocal, ni email, comme s'il n'existait pas
+        if ($owner === null || ($req->user !== null && \Axi\Support\Blocks::between($req->userId(), (int) $owner))) {
             throw new HttpException(404, 'STALL_NOT_FOUND', self::STALL_NOT_FOUND);
         }
         return $id;
@@ -169,12 +171,13 @@ final class CatalogController
     {
         $like = '%' . addcslashes($query, '%_\\') . '%';
         $stalls = Stalls::query('(s.name LIKE ? OR s.tagline LIKE ?)', [$like, $like], 'ORDER BY s.verified_at IS NULL, s.name LIMIT 20');
+        [$notBlocked, $blockedIds] = \Axi\Support\Blocks::excludeSql('s.user_id');
         $products = Database::all(
             'SELECT p.*, s.name AS stall_name, s.verified_at AS stall_verified_at
              FROM products p JOIN stalls s ON s.id = p.stall_id JOIN users u ON u.id = s.user_id
-             WHERE ' . Stalls::VISIBLE . ' AND s.status = \'active\' AND u.status = \'active\' AND p.name LIKE ?
+             WHERE ' . Stalls::VISIBLE . ' AND s.status = \'active\' AND u.status = \'active\' AND p.name LIKE ? AND ' . $notBlocked . '
              ORDER BY p.in_stock DESC, p.is_today DESC, p.updated_at DESC LIMIT 30',
-            [$like],
+            [$like, ...$blockedIds],
         );
         return [
             'query' => $query,

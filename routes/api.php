@@ -80,6 +80,10 @@ return static function (Router $r): void {
     $r->post('/v1/conversations/{id}/messages/{message}/hide', [MessagesController::class, 'hide'], $user);
     $r->get('/v1/users/{id}/profile', [ProfileController::class, 'show'], $user);
     $r->post('/v1/users/{id}/report', [ProfileController::class, 'report'], $user);
+    // Bloquer / débloquer quelqu'un qui me dérange ; liste des personnes que j'ai bloquées
+    $r->post('/v1/users/{id}/block', [ProfileController::class, 'block'], $user);
+    $r->delete('/v1/users/{id}/block', [ProfileController::class, 'unblock'], $user);
+    $r->get('/v1/me/blocked-users', [ProfileController::class, 'blocked'], $user);
     $r->post('/v1/stalls/{id}/conversation', [MessagesController::class, 'openWithStall'], $user);
     $r->post('/v1/merchant/clients/{id}/conversation', [MessagesController::class, 'openWithClient'], $merchant);
     $r->get('/v1/notifications', [AccountController::class, 'notifications'], $user);

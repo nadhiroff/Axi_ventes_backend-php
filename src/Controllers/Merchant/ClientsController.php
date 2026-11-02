@@ -132,7 +132,7 @@ final class ClientsController
             "SELECT * FROM users WHERE status = 'active' AND role IN ('client','merchant') AND id <> ? AND " . ($email !== null ? 'email = ?' : 'phone = ?'),
             [$req->userId(), $email ?? $phone],
         );
-        if ($u === null) {
+        if ($u === null || \Axi\Support\Blocks::between($req->userId(), (int) $u['id'])) {
             Response::ok(['found' => false, 'valid' => true, 'contact' => ['email' => $email, 'phone' => $phone]]);
         }
         $existing = Database::value('SELECT id FROM merchant_clients WHERE stall_id = ? AND user_id = ?', [$stall['id'], $u['id']]);
@@ -186,6 +186,10 @@ final class ClientsController
         // Rattachement au compte Axi du client s'il en a un (même email ou même téléphone)
         $user = Database::one('SELECT * FROM users WHERE status = \'active\' AND role IN (\'client\',\'merchant\') AND id <> ? AND ((email = ?) OR (phone IS NOT NULL AND phone = ?))', [$req->userId(), $in['email'] ?? '', $in['phone'] ?? '']);
         $userId = $user === null ? null : (int) $user['id'];
+        // Personne bloquée (dans un sens ou dans l'autre) : on ne peut pas l'ajouter, même par son email ou son téléphone
+        if ($userId !== null && \Axi\Support\Blocks::between($req->userId(), $userId)) {
+            throw new HttpException(422, 'CONTACT_UNAVAILABLE', 'Impossible d\'ajouter ce contact.');
+        }
         if ($userId !== null && Database::value('SELECT id FROM merchant_clients WHERE stall_id = ? AND user_id = ?', [$stall['id'], $userId]) !== null) {
             throw new HttpException(409, 'CLIENT_EXISTS', 'Ce client est déjà dans votre fichier clients.');
         }
@@ -430,8 +434,13 @@ final class ClientsController
     private function find(Request $req, int $stallId): array
     {
         $id = $req->id('cli', 'CLIENT_NOT_FOUND', 'Ce client n\'est pas dans votre fichier.');
-        return Database::one('SELECT * FROM merchant_clients WHERE id = ? AND stall_id = ?', [$id, $stallId])
+        $client = Database::one('SELECT * FROM merchant_clients WHERE id = ? AND stall_id = ?', [$id, $stallId])
             ?? throw new HttpException(404, 'CLIENT_NOT_FOUND', 'Ce client n\'est pas dans votre fichier.');
+        // Client bloqué (dans un sens ou dans l'autre) : sa fiche n'est plus accessible
+        if ($client['user_id'] !== null && \Axi\Support\Blocks::between($req->userId(), (int) $client['user_id'])) {
+            throw new HttpException(404, 'CLIENT_NOT_FOUND', 'Ce client n\'est pas dans votre fichier.');
+        }
+        return $client;
     }
 
     private function clients(int $stallId, string $segment): array
@@ -443,13 +452,24 @@ final class ClientsController
     /** @return array{0: string, 1: array} */
     private function segmentSql(string $segment): array
     {
-        return match ($segment) {
+        [$where, $params] = match ($segment) {
             'followers' => ['EXISTS (SELECT 1 FROM stall_follows f WHERE f.user_id = merchant_clients.user_id AND f.stall_id = merchant_clients.stall_id)', []],
             'resellers' => ['kind = \'reseller\'', []],
             'loyal' => ['orders_count >= ?', [Settings::int('loyal_min_orders')]],
             'to_follow_up' => ['last_order_at < ?', [Clock::now(-86400 * Settings::int('follow_up_days'))]],
             default => ['1', []],
         };
+        // Clients bloqués (dans un sens ou dans l'autre) : absents de la liste, des compteurs et des messages
+        // groupés, y compris une fiche ajoutée à la main avec leur email ou leur téléphone
+        $viewer = \Axi\Support\Blocks::viewer();
+        $hidden = $viewer === null ? [] : \Axi\Support\Blocks::hiddenFor($viewer);
+        if ($hidden !== []) {
+            $in = Database::in($hidden);
+            $where = "($where) AND (user_id IS NULL OR user_id NOT IN ($in))
+                AND NOT EXISTS (SELECT 1 FROM users bu WHERE bu.id IN ($in) AND ((merchant_clients.email IS NOT NULL AND bu.email = merchant_clients.email) OR (merchant_clients.phone IS NOT NULL AND bu.phone = merchant_clients.phone)))";
+            $params = [...$params, ...$hidden, ...$hidden];
+        }
+        return [$where, $params];
     }
 
     private function present(array $c, ?array $last = null): array

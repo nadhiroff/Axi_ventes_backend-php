@@ -43,7 +43,12 @@ final class MessagesController
             [$me, $stallId ?? 0],
         );
         $out = [];
+        $hidden = array_flip(\Axi\Support\Blocks::hiddenFor($me));
         foreach ($rows as $c) {
+            // Personne bloquée (ou qui m'a bloqué) : sa discussion disparaît de ma liste
+            if (isset($hidden[(int) $c['client_id'] === $me ? (int) $c['merchant_id'] : (int) $c['client_id']])) {
+                continue;
+            }
             $cleared = (int) ((int) $c['client_id'] === $me ? $c['client_cleared_msg_id'] : $c['merchant_cleared_msg_id']);
             $last = Database::one('SELECT m.* FROM messages m WHERE m.conversation_id = ? AND m.id > ? AND ' . Messaging::VISIBLE . self::NOT_HIDDEN . ' ORDER BY m.id DESC LIMIT 1', [$c['id'], $cleared, $me]);
             if ($last === null) {
@@ -77,6 +82,9 @@ final class MessagesController
         }
         if ($userId === null) {
             throw new HttpException(422, 'CLIENT_WITHOUT_ACCOUNT', 'Ce client n\'a pas de compte Axi : écrivez-lui par WhatsApp ou appelez-le.');
+        }
+        if (\Axi\Support\Blocks::between($req->userId(), (int) $userId)) {
+            throw new HttpException(404, 'CLIENT_NOT_FOUND', 'Client introuvable.');
         }
         // Ajouté à la main : il doit d'abord accepter (ou suivre l'étal) avant toute discussion
         if (!Messaging::linked((int) $userId, $stallId)) {
@@ -288,13 +296,15 @@ final class MessagesController
         if ($stallId > 0) {
             Database::run("UPDATE conversations c SET c.merchant_delivered_at = ?, c.merchant_delivered_msg_id = $max WHERE c.stall_id = ? AND c.last_message_at IS NOT NULL AND (c.merchant_delivered_at IS NULL OR c.merchant_delivered_at <= c.last_message_at)", [$now, $stallId]);
         }
-        // Comptés à part : les discussions où je suis client et celles de mon commerce ne se mélangent pas
+        // Comptés à part : les discussions où je suis client et celles de mon commerce ne se mélangent pas.
+        // Messages d'une personne bloquée (dans un sens ou dans l'autre) : jamais comptés
+        [$notBlocked, $blockedIds] = \Axi\Support\Blocks::excludeSql('m.sender_id', $me);
         $unread = Database::one(
             'SELECT COALESCE(SUM(c.client_id = ? AND m.id > c.client_cleared_msg_id AND (c.client_read_at IS NULL OR m.created_at > c.client_read_at)), 0) AS client,
                     COALESCE(SUM(c.stall_id = ? AND m.id > c.merchant_cleared_msg_id AND (c.merchant_read_at IS NULL OR m.created_at > c.merchant_read_at)), 0) AS merchant
              FROM messages m JOIN conversations c ON c.id = m.conversation_id
-             WHERE ' . Messaging::VISIBLE . self::NOT_HIDDEN . ' AND m.sender_id <> ?',
-            [$me, $stallId, $me, $me],
+             WHERE ' . Messaging::VISIBLE . self::NOT_HIDDEN . ' AND m.sender_id <> ? AND ' . $notBlocked,
+            [$me, $stallId, $me, $me, ...$blockedIds],
         );
         $user = Database::one('SELECT role, merchant_welcome_pending FROM users WHERE id = ?', [$me]);
         Response::ok([
@@ -327,6 +337,12 @@ final class MessagesController
         $c = Database::one('SELECT c.*, s.user_id AS merchant_id FROM conversations c JOIN stalls s ON s.id = c.stall_id WHERE c.id = ?', [$id]);
         if ($c === null || ((int) $c['client_id'] !== $req->userId() && (int) $c['merchant_id'] !== $req->userId())) {
             throw new HttpException(404, 'CONVERSATION_NOT_FOUND', 'Conversation introuvable.');
+        }
+        // Blocage entre les deux (dans un sens ou dans l'autre) : la discussion n'existe plus pour personne ;
+        // elle revient telle quelle au déblocage
+        $other = (int) $c['client_id'] === $req->userId() ? (int) $c['merchant_id'] : (int) $c['client_id'];
+        if (\Axi\Support\Blocks::between($req->userId(), $other)) {
+            throw new HttpException(404, 'CONVERSATION_NOT_FOUND', 'Cette discussion n\'est plus disponible.');
         }
         return $c;
     }
