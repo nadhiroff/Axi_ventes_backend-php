@@ -60,6 +60,12 @@ final class KkiapayGateway implements Gateway
         if ($status === 'TRANSACTION_NOT_FOUND') {
             return ['state' => 'pending', 'amount' => null, 'provider_ref' => null, 'raw' => $status];
         }
+        // Réponse illisible (erreur 5xx, page HTML…) : on ne conclut rien, le statut sera redemandé
+        if ($status === '' || $r['status'] >= 500) {
+            throw new GatewayException('KkiaPay : statut illisible (' . $r['status'] . ')');
+        }
+        // Une transaction d'une autre référence n'est jamais acceptée. Sans partnerId dans la réponse,
+        // le montant exact reste exigé (Escrow) et la transaction ne peut servir qu'à un seul paiement (index unique)
         $partner = (string) ($r['body']['partnerId'] ?? $r['body']['state'] ?? '');
         if ($partner !== '' && $partner !== $payment['reference']) {
             throw new GatewayException('KkiaPay : la transaction appartient à une autre référence');
@@ -102,10 +108,16 @@ final class KkiapayGateway implements Gateway
         }
         $event = json_decode($rawBody, true) ?: [];
         $tx = isset($event['transactionId']) ? (string) $event['transactionId'] : null;
+        $name = (string) ($event['event'] ?? 'event');
         return [
-            'key' => ($event['event'] ?? 'event') . ':' . ($tx ?? md5($rawBody)),
+            'key' => $name . ':' . ($tx ?? md5($rawBody)),
             'provider_ref' => $tx,
             'reference' => $event['partnerId'] ?? ($event['stateData'] ?? null),
+            'paid' => isset($event['isPaymentSucces']) ? (bool) $event['isPaymentSucces'] : match ($name) {
+                'transaction.success' => true,
+                'transaction.failed' => false,
+                default => null,
+            },
         ];
     }
 

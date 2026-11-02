@@ -37,8 +37,24 @@ final class FakeGateway implements Gateway
         return ['provider_ref' => 'fake_' . $payment['reference'], 'payment_url' => Url::to('/v1/payments/return?ref=' . $payment['reference'])];
     }
 
+    /**
+     * Tests de pannes (tests/payments_reliability.php), par fichiers témoins dans storage/logs :
+     *   fake-down                 passerelle injoignable pour tous les paiements
+     *   fake-pending-<référence>  le client n'a pas encore payé ce paiement
+     */
+    public static function marker(string $name): string
+    {
+        return BASE_PATH . '/storage/logs/fake-' . $name;
+    }
+
     public function status(array $payment): array
     {
+        if (is_file(self::marker('down'))) {
+            throw new GatewayException('Passerelle injoignable (panne simulée)');
+        }
+        if (is_file(self::marker('pending-' . $payment['reference']))) {
+            return ['state' => 'pending', 'amount' => (int) $payment['amount'], 'provider_ref' => null, 'raw' => 'fake_pending'];
+        }
         // Demande jamais arrivée à la passerelle (coupure simulée) : rien n'a pu être payé
         if ($payment['payment_url'] === null) {
             return ['state' => 'pending', 'amount' => (int) $payment['amount'], 'provider_ref' => null, 'raw' => 'fake_not_sent'];

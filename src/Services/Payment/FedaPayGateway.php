@@ -79,7 +79,8 @@ final class FedaPayGateway implements Gateway
             throw new GatewayException('FedaPay : statut illisible (' . $r['status'] . ')');
         }
         // La transaction doit porter NOTRE référence : on n'accepte pas le paiement d'une autre commande
-        if (($tx['merchant_reference'] ?? $payment['reference']) !== $payment['reference']) {
+        // Référence absente = refusée : on ne suppose jamais qu'une transaction est la nôtre
+        if (($tx['merchant_reference'] ?? null) !== $payment['reference']) {
             throw new GatewayException('FedaPay : la transaction ne correspond pas à cette référence');
         }
         $state = match ((string) $tx['status']) {
@@ -140,15 +141,23 @@ final class FedaPayGateway implements Gateway
         foreach ($parts['s'] ?? [] as $candidate) {
             $valid = $valid || hash_equals($expected, $candidate);
         }
-        if (!$valid || abs(time() - $t) > 300) {
+        // Tolérance d'une heure : FedaPay rejoue un événement pendant plusieurs minutes, peut-être avec la signature
+        // d'origine. Rejouer un vieil événement est sans danger : il ne fait que déclencher une vérification serveur
+        if (!$valid || abs(time() - $t) > 3600) {
             return null;
         }
         $event = json_decode($rawBody, true);
-        $entity = $event['entity'] ?? [];
+        $entity = is_array($event['entity'] ?? null) ? $event['entity'] : [];
+        $name = (string) ($event['name'] ?? 'event');
         return [
-            'key' => ($event['name'] ?? 'event') . ':' . ($entity['id'] ?? '') . ':' . ($entity['updated_at'] ?? $t),
+            'key' => $name . ':' . ($entity['id'] ?? '') . ':' . ($entity['updated_at'] ?? $t),
             'provider_ref' => isset($entity['id']) ? (string) $entity['id'] : null,
             'reference' => $entity['merchant_reference'] ?? ($entity['custom_metadata']['axi_reference'] ?? null),
+            'paid' => match (true) {
+                str_ends_with($name, '.approved'), str_ends_with($name, '.transferred') => true,
+                str_ends_with($name, '.declined'), str_ends_with($name, '.canceled') => false,
+                default => null,
+            },
         ];
     }
 

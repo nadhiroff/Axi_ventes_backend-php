@@ -15,7 +15,8 @@ final class CronController
     public function run(Request $req): never
     {
         $key = (string) Config::get('cron_key');
-        $given = (string) $req->query('key', '');
+        // En-tête X-Cron-Key de préférence : une clé dans l'adresse finit dans les journaux du serveur
+        $given = (string) ($req->header('x-cron-key') ?? $req->query('key', ''));
         // Clé absente ou trop courte : la route n'existe pas
         if (strlen($key) < 32 || !hash_equals($key, $given)) {
             throw new HttpException(404, 'NOT_FOUND', 'Cette adresse n\'existe pas.');

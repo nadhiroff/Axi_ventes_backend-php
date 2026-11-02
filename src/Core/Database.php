@@ -80,19 +80,34 @@ final class Database
         }
     }
 
+    /** Interblocage (1213) ou attente de verrou trop longue (1205) : MySQL a tout annulé, on peut rejouer */
+    private const RETRYABLE = [1205, 1213];
+
+    /**
+     * Transaction rejouée jusqu'à 3 fois si MySQL l'annule pour un interblocage (deux paniers qui réservent
+     * les mêmes produits au même instant) : le client reçoit sa commande au lieu d'une erreur 500.
+     * $fn ne doit écrire qu'en base (aucun appel réseau) : elle peut être exécutée plusieurs fois.
+     */
     public static function transaction(callable $fn): mixed
     {
         $pdo = self::pdo();
-        $pdo->beginTransaction();
-        try {
-            $result = $fn();
-            $pdo->commit();
-            return $result;
-        } catch (\Throwable $e) {
-            if ($pdo->inTransaction()) {
-                $pdo->rollBack();
+        for ($attempt = 1; ; $attempt++) {
+            $pdo->beginTransaction();
+            try {
+                $result = $fn();
+                $pdo->commit();
+                return $result;
+            } catch (\Throwable $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                $code = $e instanceof \PDOException ? (int) ($e->errorInfo[1] ?? 0) : 0;
+                if ($attempt >= 3 || !in_array($code, self::RETRYABLE, true)) {
+                    throw $e;
+                }
+                Logger::write('database', "Transaction rejouée (erreur MySQL $code, essai $attempt)");
+                usleep(random_int(20_000, 120_000) * $attempt);
             }
-            throw $e;
         }
     }
 

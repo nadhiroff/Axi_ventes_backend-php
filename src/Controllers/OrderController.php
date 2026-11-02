@@ -102,6 +102,13 @@ final class OrderController
             if ($paymentMode === 'on_site' && !$quote['pay_on_site_available']) {
                 throw new HttpException(422, 'PAY_ON_SITE_UNAVAILABLE', 'Un des commerçants de votre panier n\'accepte pas le paiement sur place. Payez en ligne.');
             }
+            // Toujours le même ordre de réservation (étal, puis produit) : deux paniers qui se croisent
+            // ne peuvent pas se bloquer mutuellement (interblocage MySQL)
+            ksort($quote['_parts']);
+            foreach ($quote['_parts'] as &$items) {
+                usort($items, static fn (array $a, array $b): int => $a['product_id'] <=> $b['product_id']);
+            }
+            unset($items);
             return Database::transaction(function () use ($req, $key, $hash, $quote, $reception, $detail, $pointId, $operator, $phone, $provider, $paymentMode): array {
                 $now = Clock::now();
                 $orderId = Database::insert(
@@ -199,8 +206,15 @@ final class OrderController
     {
         $id = $this->ownOrder($req);
         $payment = Database::one('SELECT * FROM payments WHERE order_id = ?', [$id]);
-        // Dernière vérification : un paiement validé entre-temps n'est jamais annulé
-        Escrow::refresh((int) $payment['id'], 'client', $req->userId());
+        // Dernière vérification : un paiement validé entre-temps n'est jamais annulé. Sans réponse de la
+        // passerelle, on n'annule pas : le client pourrait repayer alors que son premier paiement est passé
+        $check = Escrow::check((int) $payment['id'], 'client', $req->userId());
+        if (!$check['reached'] && $check['payment']['status'] === 'pending') {
+            throw new HttpException(503, 'PAYMENT_CHECK_UNAVAILABLE', 'Impossible de vérifier votre paiement auprès de l\'opérateur pour l\'instant. Rien n\'est annulé : réessayez dans quelques minutes.');
+        }
+        if ($check['payment']['status'] === 'pending' && $check['payment']['claimed_provider_ref'] !== null) {
+            throw new HttpException(409, 'PAYMENT_BEING_VERIFIED', 'Un paiement de cette commande est en cours de vérification. Patientez quelques minutes avant d\'annuler, et ne payez pas une seconde fois.');
+        }
         $n = Database::run('UPDATE orders SET status = \'cancelled\', cancelled_at = ? WHERE id = ? AND status = \'awaiting_payment\'', [Clock::now(), $id])->rowCount();
         if ($n === 0) {
             throw new HttpException(409, 'ORDER_NOT_CANCELLABLE', 'Cette commande est déjà payée : signalez un litige si besoin.');
@@ -357,8 +371,12 @@ final class OrderController
     private function present(int $orderId, bool $refresh): array
     {
         $payment = Database::one('SELECT * FROM payments WHERE order_id = ?', [$orderId]);
-        if ($refresh && $payment !== null && $payment['status'] === 'pending' && $payment['provider_ref'] !== null) {
-            // Statut toujours vérifié auprès de la passerelle tant que la commande attend son paiement
+        // Tant que la commande attend son paiement, le statut est revérifié auprès de la passerelle, mais au plus
+        // une fois toutes les 20 s : l'application relit la commande toutes les 5 s, chaque relecture ne doit pas
+        // occuper la passerelle (le worker et les webhooks font le reste)
+        if ($refresh && $payment !== null && $payment['status'] === 'pending'
+            && ($payment['provider_ref'] !== null || $payment['claimed_provider_ref'] !== null)
+            && ($payment['checked_at'] === null || strtotime($payment['checked_at'] . ' UTC') < time() - 20)) {
             $payment = Escrow::refresh((int) $payment['id']);
         }
         $order = Database::one('SELECT o.*, p.name AS point_name FROM orders o LEFT JOIN axi_points p ON p.id = o.axi_point_id WHERE o.id = ?', [$orderId]);

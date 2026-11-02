@@ -79,39 +79,240 @@ final class Escrow
         return true;
     }
 
+    /** Paiement clos sans encaissement : la passerelle peut encore annoncer un paiement tardif */
+    public const CLOSED = ['failed', 'cancelled', 'expired'];
+
     /**
      * Vérifie le paiement auprès de la passerelle (serveur à serveur) et applique le résultat.
-     * $providerRef : identifiant de transaction rapporté par la page de paiement (KkiaPay), vérifié avant usage.
+     * $providerRef : identifiant de transaction KkiaPay. Venu de la page de paiement ($trustedRef = false), c'est une
+     * simple annonce : retenue pour ne pas rouvrir le paiement, vérifiée, et jamais utilisée pour conclure à un échec.
      */
     public static function refresh(int $paymentId, string $actorType = 'system', ?int $actorId = null, ?string $providerRef = null): array
     {
+        return self::check($paymentId, $actorType, $actorId, $providerRef)['payment'];
+    }
+
+    /**
+     * Comme refresh, et dit si la passerelle a effectivement répondu (reached = false : panne ou réponse illisible,
+     * rien n'a été conclu). Un paiement annulé ou expiré est revérifié aussi : s'il a été payé entre-temps, il est
+     * traité comme un paiement tardif, jamais ignoré.
+     * @return array{payment: array, reached: bool}
+     */
+    public static function check(int $paymentId, string $actorType = 'system', ?int $actorId = null, ?string $providerRef = null, bool $trustedRef = false): array
+    {
         $payment = Database::one('SELECT * FROM payments WHERE id = ?', [$paymentId]) ?? throw new HttpException(404, 'NOT_FOUND', 'Paiement introuvable.');
-        if ($payment['status'] !== 'pending') {
-            return $payment;
+        $pending = $payment['status'] === 'pending';
+        if (!$pending && !in_array($payment['status'], self::CLOSED, true)) {
+            return ['payment' => $payment, 'reached' => true];
         }
-        if ($providerRef !== null && $payment['provider_ref'] === null) {
-            $payment['provider_ref'] = $providerRef;
+        if ($providerRef !== null && ($providerRef === '' || strlen($providerRef) > 80)) {
+            $providerRef = null;
         }
+        // Transaction annoncée par la page de paiement : retenue tout de suite, pour que la page ne rouvre pas
+        // le paiement pendant la vérification (un deuxième débit serait possible chez KkiaPay)
+        if ($pending && $providerRef !== null && !$trustedRef && $payment['provider_ref'] === null && $payment['claimed_provider_ref'] === null) {
+            Database::run('UPDATE payments SET claimed_provider_ref = ? WHERE id = ? AND claimed_provider_ref IS NULL', [$providerRef, $paymentId]);
+            $payment['claimed_provider_ref'] = $providerRef;
+        }
+        $probe = $payment;
+        $probe['provider_ref'] ??= $providerRef ?? $payment['claimed_provider_ref'];
         try {
-            $status = Gateways::get($payment['provider'])->status($payment);
+            $status = Gateways::get($payment['provider'])->status($probe);
         } catch (GatewayException $e) {
             Logger::write('payments', "Statut indisponible {$payment['reference']} : " . $e->getMessage());
-            return $payment;
+            return ['payment' => $payment, 'reached' => false];
         }
-        Database::run('UPDATE payments SET gateway_status = ?, checked_at = ? WHERE id = ?', [$status['raw'], Clock::now(), $paymentId]);
+        Database::run('UPDATE payments SET gateway_status = ?, checked_at = ? WHERE id = ?', [mb_substr($status['raw'], 0, 40), Clock::now(), $paymentId]);
+        $txRef = (string) ($status['provider_ref'] ?? $probe['provider_ref'] ?? '');
 
         if ($status['state'] === 'paid') {
-            // Le montant payé doit être exactement celui calculé par le serveur
-            if ($status['amount'] !== null && $status['amount'] !== (int) $payment['amount']) {
-                self::log('amount_mismatch', ['payment' => $paymentId, 'order' => $payment['order_id']], $actorType, $actorId, 'pending', 'pending', $status['provider_ref'], $status['amount']);
-                Logger::write('payments', "MONTANT DIFFÉRENT {$payment['reference']} : attendu {$payment['amount']}, reçu {$status['amount']}");
-                return $payment;
+            // Le montant payé doit être annoncé et exactement celui calculé par le serveur
+            if ($status['amount'] === null || $status['amount'] !== (int) $payment['amount']) {
+                self::log('amount_mismatch', ['payment' => $paymentId, 'order' => $payment['order_id']], $actorType, $actorId, $payment['status'], $payment['status'], $txRef, $status['amount']);
+                Logger::write('payments', "MONTANT ABSENT OU DIFFÉRENT {$payment['reference']} : attendu {$payment['amount']}, reçu " . var_export($status['amount'], true));
+                return ['payment' => $payment, 'reached' => true];
             }
-            self::markPaid($payment, (string) $status['provider_ref'], $actorType, $actorId);
-        } elseif (in_array($status['state'], ['failed', 'cancelled', 'expired'], true)) {
-            self::markFailed($payment, $status['state'], $status['raw'], $actorType, $actorId);
+            if ($pending) {
+                self::markPaid($payment, $txRef, $actorType, $actorId);
+            } else {
+                self::handleLatePayment($payment, $txRef, $actorType, $actorId);
+            }
+        } elseif ($pending && in_array($status['state'], self::CLOSED, true)) {
+            if ($payment['provider'] === 'kkiapay') {
+                // KkiaPay : un essai refusé n'empêche pas d'en refaire un autre dans la même page ; seule
+                // l'annonce invalide est oubliée (le paiement redevient possible), l'expiration fera le reste
+                Database::run('UPDATE payments SET claimed_provider_ref = NULL WHERE id = ? AND claimed_provider_ref = ?', [$paymentId, $probe['provider_ref']]);
+            } else {
+                self::markFailed($payment, $status['state'], $status['raw'], $actorType, $actorId);
+            }
         }
-        return Database::one('SELECT * FROM payments WHERE id = ?', [$paymentId]);
+        return ['payment' => Database::one('SELECT * FROM payments WHERE id = ?', [$paymentId]), 'reached' => true];
+    }
+
+    /**
+     * Paiement confirmé par la passerelle APRÈS l'annulation ou l'expiration : l'argent a été pris, il n'est jamais
+     * ignoré. Abonnement : activé. Commande : réactivée si le stock est encore là, sinon litige automatique
+     * (argent bloqué chez Axi, un agent rembourse) ; le client et les agents Axi sont prévenus.
+     */
+    private static function handleLatePayment(array $payment, string $providerRef, string $actorType, ?int $actorId): void
+    {
+        $closed = "status IN ('failed', 'cancelled', 'expired')";
+        $ids = ['payment' => $payment['id'], 'order' => $payment['order_id']];
+        Logger::write('payments', "PAIEMENT TARDIF {$payment['reference']} ({$payment['status']}) transaction $providerRef");
+
+        if ($payment['purpose'] === 'subscription') {
+            $reopened = Database::transaction(static function () use ($payment, $closed): bool {
+                $n = Database::run("UPDATE payments SET status = 'pending', late_paid_at = ? WHERE id = ? AND $closed", [Clock::now(), $payment['id']])->rowCount();
+                Database::run("UPDATE subscriptions SET status = 'pending' WHERE id = ? AND status = 'cancelled'", [$payment['subscription_id']]);
+                return $n > 0;
+            });
+            if ($reopened) {
+                self::log('payment_late', $ids, $actorType, $actorId, $payment['status'], 'pending', $providerRef, (int) $payment['amount']);
+                self::markPaid(Database::one('SELECT * FROM payments WHERE id = ?', [$payment['id']]), $providerRef, $actorType, $actorId);
+            }
+            return;
+        }
+
+        // 1. Réactivation : le stock rendu à l'annulation est repris (tout ou rien)
+        try {
+            $reactivated = Database::transaction(static function () use ($payment, $closed): bool {
+                $n = Database::run("UPDATE payments SET late_paid_at = ? WHERE id = ? AND $closed AND late_paid_at IS NULL", [Clock::now(), $payment['id']])->rowCount();
+                $order = Database::one('SELECT * FROM orders WHERE id = ? FOR UPDATE', [$payment['order_id']]);
+                if ($n === 0 || $order === null || $order['status'] !== 'cancelled') {
+                    return false;
+                }
+                if ($order['stock_restored_at'] !== null) {
+                    $items = Database::all(
+                        'SELECT i.product_id, SUM(i.quantity) AS qty FROM order_items i JOIN order_stalls os ON os.id = i.order_stall_id
+                         WHERE os.order_id = ? GROUP BY i.product_id ORDER BY i.product_id',
+                        [$order['id']],
+                    );
+                    foreach ($items as $item) {
+                        $taken = Database::run('UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ? AND stock_quantity >= ?', [$item['qty'], $item['product_id'], $item['qty']])->rowCount();
+                        if ($taken === 0 && Database::value('SELECT stock_quantity FROM products WHERE id = ?', [$item['product_id']]) !== null) {
+                            throw new StockGone();
+                        }
+                    }
+                }
+                Database::run('UPDATE orders SET status = \'awaiting_payment\', cancelled_at = NULL, stock_restored_at = NULL WHERE id = ?', [$order['id']]);
+                Database::run('UPDATE order_stalls SET status = \'awaiting_payment\' WHERE order_id = ? AND escrow_state = \'pending\'', [$order['id']]);
+                Database::run("UPDATE payments SET status = 'pending', failure_reason = NULL WHERE id = ?", [$payment['id']]);
+                return true;
+            });
+        } catch (StockGone) {
+            $reactivated = null;
+        }
+        if ($reactivated === true) {
+            self::log('payment_late_reactivated', $ids, $actorType, $actorId, $payment['status'], 'pending', $providerRef, (int) $payment['amount']);
+            self::markPaid(Database::one('SELECT * FROM payments WHERE id = ?', [$payment['id']]), $providerRef, $actorType, $actorId);
+            Notifier::send((int) $payment['user_id'], 'payment', 'Commande réactivée', 'Votre paiement de la commande n° ' . $payment['order_id'] . ' est arrivé après son annulation. La commande est réactivée : vos commerçants la préparent.', ['order_id' => 'cmd_' . $payment['order_id']]);
+            return;
+        }
+        if ($reactivated === false) {
+            return; // déjà traité par un autre chemin (webhook et réconciliation en même temps)
+        }
+
+        // 2. Stock parti entre-temps : l'argent est bloqué chez Axi et un litige est ouvert pour le rembourser
+        $disputeId = Database::transaction(static function () use ($payment, $providerRef, $closed): ?int {
+            $now = Clock::now();
+            $n = Database::run(
+                "UPDATE payments SET status = 'paid', paid_at = ?, late_paid_at = COALESCE(late_paid_at, ?), provider_ref = COALESCE(provider_ref, ?) WHERE id = ? AND $closed",
+                [$now, $now, $providerRef, $payment['id']],
+            )->rowCount();
+            if ($n === 0) {
+                return null;
+            }
+            $order = Database::one('SELECT client_id FROM orders WHERE id = ?', [$payment['order_id']]);
+            Database::run('UPDATE orders SET status = \'disputed\', paid_at = ? WHERE id = ?', [$now, $payment['order_id']]);
+            $id = Database::insert(
+                'INSERT INTO disputes (order_id, order_stall_id, client_id, reason, created_at) VALUES (?, NULL, ?, ?, ?)',
+                [$payment['order_id'], $order['client_id'], 'Automatique : paiement Mobile Money reçu après l\'annulation de la commande, produits plus disponibles. À rembourser.', $now],
+            );
+            foreach (Database::all('SELECT * FROM order_stalls WHERE order_id = ? AND escrow_state = \'pending\'', [$payment['order_id']]) as $part) {
+                Database::run('UPDATE order_stalls SET escrow_state = \'disputed\' WHERE id = ?', [$part['id']]);
+                self::log('escrow_disputed', ['payment' => $payment['id'], 'order' => $payment['order_id'], 'stall_part' => $part['id']], 'system', null, 'pending', 'disputed', $providerRef, (int) $part['net_amount'], ['dispute_id' => $id]);
+            }
+            self::log('payment_late_disputed', ['payment' => $payment['id'], 'order' => $payment['order_id']], 'system', null, $payment['status'], 'paid', $providerRef, (int) $payment['amount'], ['dispute_id' => $id]);
+            return $id;
+        });
+        if ($disputeId === null) {
+            return;
+        }
+        Notifier::send((int) $payment['user_id'], 'payment', 'Paiement reçu après l\'annulation', 'Nous avons reçu ' . self::fcfa((int) $payment['amount']) . ' pour la commande n° ' . $payment['order_id'] . ' après son annulation, et les produits ne sont plus disponibles. L\'argent est gardé par Axi : vous allez être remboursé. Ne payez pas une seconde fois.', ['order_id' => 'cmd_' . $payment['order_id']], [], true);
+        self::alertAgents('Paiement tardif à rembourser', 'Commande n° ' . $payment['order_id'] . ' : ' . self::fcfa((int) $payment['amount']) . ' reçus après l\'annulation (référence ' . $payment['reference'] . '). Litige ouvert automatiquement : remboursez depuis Litiges.');
+    }
+
+    /**
+     * Transaction réussie EN PLUS de celle déjà retenue pour la même référence (KkiaPay : page rouverte puis payée
+     * deux fois). Vérifiée auprès de la passerelle, remboursée en totalité, enregistrée, client et agents prévenus.
+     * @return string ce qui a été fait (journal du webhook)
+     */
+    public static function handleExtraTransaction(array $payment, string $txRef): string
+    {
+        if ($txRef === (string) $payment['provider_ref']
+            || Database::value('SELECT 1 FROM payment_duplicates WHERE provider = ? AND provider_ref = ?', [$payment['provider'], $txRef]) !== null) {
+            return 'already_handled';
+        }
+        if (Database::value('SELECT 1 FROM payments WHERE provider = ? AND provider_ref = ?', [$payment['provider'], $txRef]) !== null) {
+            return 'belongs_to_other_payment';
+        }
+        $gateway = Gateways::get($payment['provider']);
+        $probe = ['provider_ref' => $txRef, 'refunded_amount' => 0] + $payment;
+        $status = $gateway->status($probe); // GatewayException : le webhook sera rejoué
+        if ($status['state'] !== 'paid') {
+            return 'not_paid';
+        }
+        $probe['amount'] = $status['amount'] ?? (int) $payment['amount'];
+        $refund = $gateway->refund($probe, (int) $probe['amount']);
+        $inserted = Database::run(
+            'INSERT IGNORE INTO payment_duplicates (payment_id, provider, provider_ref, amount, refund_status, refund_message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [$payment['id'], $payment['provider'], $txRef, $probe['amount'], $refund['status'], mb_substr($refund['message'], 0, 255), Clock::now()],
+        )->rowCount();
+        if ($inserted === 0) {
+            return 'already_handled';
+        }
+        self::log('duplicate_' . $refund['status'], ['payment' => $payment['id'], 'order' => $payment['order_id']], 'system', null, $payment['status'], $payment['status'], $txRef, (int) $probe['amount'], ['message' => $refund['message']]);
+        Logger::write('payments', "DOUBLE PAIEMENT {$payment['reference']} transaction $txRef : remboursement {$refund['status']}");
+        $done = in_array($refund['status'], ['succeeded', 'simulated'], true);
+        Notifier::send((int) $payment['user_id'], 'payment', 'Paiement en double', 'Vous avez payé deux fois ' . self::fcfa((int) $probe['amount']) . ' pour la même ' . ($payment['order_id'] !== null ? 'commande n° ' . $payment['order_id'] : 'demande') . '. ' . ($done ? 'Le second paiement vous est remboursé.' : 'Le second paiement va vous être remboursé par l\'équipe Axi.'), $payment['order_id'] !== null ? ['order_id' => 'cmd_' . $payment['order_id']] : [], [], true);
+        if (!$done) {
+            self::alertAgents('Paiement en double à rembourser', 'Référence ' . $payment['reference'] . ', transaction ' . $txRef . ' (' . self::fcfa((int) $probe['amount']) . ') : ' . $refund['message']);
+        }
+        return 'refund_' . $refund['status'];
+    }
+
+    /** Alerte aux agents Axi actifs (application et email, même si l'email est désactivé) */
+    public static function alertAgents(string $title, string $text): void
+    {
+        $agents = Database::all(
+            "SELECT u.id FROM users u JOIN organizations o ON o.id = u.organization_id WHERE u.role = 'partner' AND o.type = 'axi' AND u.status = 'active'",
+        );
+        foreach ($agents as $agent) {
+            Notifier::send((int) $agent['id'], 'payment', $title, $text, [], [], true);
+        }
+        Logger::write('payments', "ALERTE AGENTS : $title : $text");
+    }
+
+    /**
+     * Réconciliation (worker chaque minute, tâche planifiée) : paiements en attente revérifiés, les plus anciens
+     * vérifiés d'abord, de moins en moins souvent avec l'âge (1 min, puis 5 min, puis 30 min). Les paiements
+     * FedaPay annulés ou expirés depuis moins de 24 h sont revérifiés toutes les 30 min (paiement tardif).
+     * @return int nombre de paiements vérifiés
+     */
+    public static function reconcile(int $limit): int
+    {
+        $ids = array_column(Database::all(
+            "SELECT id FROM payments
+             WHERE ((status = 'pending' AND (payment_url IS NOT NULL OR claimed_provider_ref IS NOT NULL) AND created_at > ?
+                     AND (checked_at IS NULL OR checked_at < CASE WHEN created_at > ? THEN ? WHEN created_at > ? THEN ? ELSE ? END))
+                 OR (status IN ('cancelled', 'expired') AND provider = 'fedapay' AND provider_ref IS NOT NULL AND created_at > ? AND (checked_at IS NULL OR checked_at < ?)))
+             ORDER BY checked_at IS NOT NULL, checked_at, id LIMIT " . max(1, $limit),
+            [Clock::now(-48 * 3600), Clock::now(-900), Clock::now(-60), Clock::now(-7200), Clock::now(-300), Clock::now(-1800), Clock::now(-24 * 3600), Clock::now(-1800)],
+        ), 'id');
+        foreach ($ids as $id) {
+            self::check((int) $id);
+        }
+        return count($ids);
     }
 
     private static function markPaid(array $payment, string $providerRef, string $actorType, ?int $actorId): void
@@ -394,27 +595,53 @@ final class Escrow
         }
     }
 
-    /** Versement des sommes libérées à un commerçant (simulé en sandbox, réel en production) */
+    /**
+     * Versement des sommes libérées à un commerçant (simulé en sandbox, réel en production).
+     * Jamais deux fois : un seul versement à la fois par étal (verrou), et les parts sont réservées à CE versement
+     * AVANT l'appel à la passerelle. Elles ne redeviennent disponibles que sur un refus explicite ; une réponse
+     * perdue (coupure) laisse le versement « en cours » à vérifier dans le tableau de bord de la passerelle.
+     */
     public static function payout(int $stallId, int $agentId): array
     {
+        return Database::withLock('axi_payout_' . $stallId, 0, static fn (): array => self::payoutLocked($stallId, $agentId));
+    }
+
+    private static function payoutLocked(int $stallId, int $agentId): array
+    {
         $stall = Database::one('SELECT s.*, u.name AS owner FROM stalls s JOIN users u ON u.id = s.user_id WHERE s.id = ?', [$stallId]);
-        $parts = Database::all('SELECT * FROM order_stalls WHERE stall_id = ? AND escrow_state = \'released\' AND payout_id IS NULL', [$stallId]);
+        $gateway = Gateways::get();
+        [$payoutId, $parts] = Database::transaction(static function () use ($stallId, $stall, $gateway, $agentId): array {
+            $payoutId = Database::insert(
+                'INSERT INTO payouts (stall_id, amount, phone, provider, status, created_by, created_at) VALUES (?, 0, ?, ?, \'processing\', ?, ?)',
+                [$stallId, $stall['phone'], $gateway->name(), $agentId, Clock::now()],
+            );
+            Database::run('UPDATE order_stalls SET payout_id = ? WHERE stall_id = ? AND escrow_state = \'released\' AND payout_id IS NULL', [$payoutId, $stallId]);
+            return [$payoutId, Database::all('SELECT * FROM order_stalls WHERE payout_id = ?', [$payoutId])];
+        });
         $amount = array_sum(array_map(static fn (array $p): int => (int) $p['net_amount'], $parts));
         if ($amount <= 0) {
+            Database::run('UPDATE order_stalls SET payout_id = NULL WHERE payout_id = ?', [$payoutId]);
+            Database::run('DELETE FROM payouts WHERE id = ?', [$payoutId]);
             throw new HttpException(409, 'NOTHING_TO_PAY', 'Aucune somme libérée à verser à ce commerçant.');
         }
         // Crédit en cours avec retenue acceptée par le commerçant : la part convenue rembourse son crédit
         $withheld = \Axi\Services\Credit::withholding((int) $stall['user_id'], $amount);
         $amount -= $withheld;
-        $gateway = Gateways::get();
-        $payoutId = Database::insert(
-            'INSERT INTO payouts (stall_id, amount, phone, provider, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-            [$stallId, $amount, $stall['phone'], $gateway->name(), $agentId, Clock::now()],
-        );
-        $result = $gateway->payout($amount, (string) $stall['phone'], (string) $stall['owner'], 'axi_payout_' . $payoutId);
+        Database::run('UPDATE payouts SET amount = ? WHERE id = ?', [$amount, $payoutId]);
+        try {
+            $result = $gateway->payout($amount, (string) $stall['phone'], (string) $stall['owner'], 'axi_payout_' . $payoutId);
+        } catch (GatewayException $e) {
+            // Réponse perdue : l'argent est peut-être parti. Rien n'est rendu disponible, un agent vérifie
+            Logger::write('payments', "VERSEMENT INCERTAIN axi_payout_$payoutId : " . $e->getMessage());
+            self::log('payout_uncertain', [], 'partner', $agentId, 'released', 'processing', null, $amount, ['stall_id' => $stallId, 'payout_id' => $payoutId]);
+            return ['id' => $payoutId, 'amount' => $amount, 'status' => 'pending', 'provider_ref' => null,
+                'message' => 'Réponse de la passerelle perdue : vérifiez le versement axi_payout_' . $payoutId . ' dans son tableau de bord avant tout nouvel essai.'];
+        }
         Database::run('UPDATE payouts SET status = ?, provider_ref = ?, processed_at = ? WHERE id = ?', [$result['status'], $result['provider_ref'], Clock::now(), $payoutId]);
-        if ($result['status'] !== 'failed') {
-            Database::run('UPDATE order_stalls SET payout_id = ? WHERE id IN (' . Database::in($parts) . ')', [$payoutId, ...array_column($parts, 'id')]);
+        if ($result['status'] === 'failed') {
+            // Refus explicite : les parts redeviennent disponibles pour un prochain versement
+            Database::run('UPDATE order_stalls SET payout_id = NULL WHERE payout_id = ?', [$payoutId]);
+        } else {
             if ($withheld > 0) {
                 $creditId = (int) Database::value('SELECT id FROM credits WHERE merchant_user_id = ? AND status = \'granted\' AND withhold_pct > 0 ORDER BY id LIMIT 1', [$stall['user_id']]);
                 \Axi\Services\Credit::repay($creditId, $withheld, 'payout', $payoutId, $agentId);
