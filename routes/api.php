@@ -60,7 +60,10 @@ return static function (Router $r): void {
     $r->get('/v1/me/data', [AccountController::class, 'data'], $user);
     $r->post('/v1/me/export', [AccountController::class, 'exportLink'], $user);
     $r->get('/v1/me/export.json', [AccountController::class, 'export']);
+    // Suppression du compte : demande (mot de passe + raison) traitée par l'équipe Axi ; annulable tant qu'elle attend
     $r->post('/v1/me/delete', [AccountController::class, 'deleteAccount'], $user);
+    $r->get('/v1/me/deletion-request', [AccountController::class, 'deletionRequest'], $user);
+    $r->delete('/v1/me/deletion-request', [AccountController::class, 'cancelDeletionRequest'], $user);
     $r->post('/v1/me/avatar', [AccountController::class, 'avatar'], $user);
     $r->delete('/v1/me/avatar', [AccountController::class, 'deleteAvatar'], $user);
     $r->get('/v1/me/badges', [MessagesController::class, 'badges'], $user);

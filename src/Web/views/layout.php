@@ -8,9 +8,9 @@ use Axi\Web\WebAuth;
 $path = '/' . trim((string) preg_replace('#^.*?/pro#', '/pro', (string) parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH)), '/');
 $section = WebAuth::section($path);
 $isAxi = $user !== null && $user['partner_type'] === 'axi';
-$counts = $isAxi ? Live::counts() : ['applications' => 0, 'disputes' => 0, 'visits' => 0, 'proposals' => 0, 'reports' => 0, 'credits' => 0, 'campaigns' => 0];
-$badgeFor = ['/pro/campagnes' => (int) $counts['campaigns'], '/pro/credits' => (int) $counts['credits'], '/pro/demandes' => (int) $counts['applications'], '/pro/commandes' => (int) $counts['disputes'], '/pro/commercants' => (int) $counts['visits'], '/pro/allees' => (int) $counts['proposals'], '/pro/signalements' => (int) $counts['reports']];
-$navIcons = ['/pro' => 'home', '/pro/prix' => 'trend', '/pro/campagnes' => 'megaphone', '/pro/recensement' => 'map', '/pro/credits' => 'wallet', '/pro/demandes' => 'inbox', '/pro/commercants' => 'store', '/pro/clients' => 'users', '/pro/signalements' => 'flag', '/pro/commandes' => 'package', '/pro/paiements' => 'card', '/pro/allees' => 'grid', '/pro/partenaires' => 'handshake', '/pro/reglages' => 'settings', '/pro/journal' => 'list'];
+$counts = $isAxi ? Live::counts() : ['applications' => 0, 'disputes' => 0, 'visits' => 0, 'proposals' => 0, 'reports' => 0, 'credits' => 0, 'campaigns' => 0, 'deletions' => 0];
+$badgeFor = ['/pro/campagnes' => (int) $counts['campaigns'], '/pro/credits' => (int) $counts['credits'], '/pro/demandes' => (int) $counts['applications'], '/pro/commandes' => (int) $counts['disputes'], '/pro/commercants' => (int) $counts['visits'], '/pro/allees' => (int) $counts['proposals'], '/pro/signalements' => (int) $counts['reports'], '/pro/suppressions' => (int) $counts['deletions']];
+$navIcons = ['/pro' => 'home', '/pro/prix' => 'trend', '/pro/campagnes' => 'megaphone', '/pro/recensement' => 'map', '/pro/credits' => 'wallet', '/pro/demandes' => 'inbox', '/pro/commercants' => 'store', '/pro/clients' => 'users', '/pro/signalements' => 'flag', '/pro/suppressions' => 'trash', '/pro/commandes' => 'package', '/pro/paiements' => 'card', '/pro/allees' => 'grid', '/pro/partenaires' => 'handshake', '/pro/reglages' => 'settings', '/pro/journal' => 'list'];
 $tabs = null;
 foreach (WebAuth::TABS as $group) {
     if ($group[0][0] === $section && $user !== null) {

@@ -12,7 +12,7 @@
 SET NAMES utf8mb4;
 SET time_zone = '+00:00';
 SET FOREIGN_KEY_CHECKS = 0;
-DROP TABLE IF EXISTS user_blocks, profile_changes, payment_duplicates, rate_limits, worker_heartbeats, outbox_jobs, campaign_reports, credit_repayments, sales_hidden, push_tokens, stall_announcement_photos, stall_emails, stall_announcements, reports, message_hidden, stall_photos, messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
+DROP TABLE IF EXISTS account_deletion_requests, user_blocks, profile_changes, payment_duplicates, rate_limits, worker_heartbeats, outbox_jobs, campaign_reports, credit_repayments, sales_hidden, push_tokens, stall_announcement_photos, stall_emails, stall_announcements, reports, message_hidden, stall_photos, messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
 SET FOREIGN_KEY_CHECKS = 1;
 
 CREATE TABLE schema_migrations (
@@ -1372,6 +1372,32 @@ CREATE TABLE user_blocks (
 ) ENGINE=InnoDB;
 
 INSERT INTO schema_migrations (file, applied_at) VALUES ('025_blocages_utilisateurs.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 026_demandes_suppression.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 026 : suppression de compte sur demande. La personne donne son mot de passe et la raison ; la demande attend
+--   l'équipe Axi, qui efface définitivement le compte et ses informations, ou annule la demande (personne prévenue).
+--   Après effacement, la ligne ne garde plus aucune donnée personnelle (raison vidée) : seulement qui, quand.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer), ou php database/migrate.php.
+-- =============================================================================
+CREATE TABLE account_deletion_requests (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id INT UNSIGNED NULL,
+  reason VARCHAR(1000) NULL,
+  status ENUM('pending','erased','cancelled','withdrawn') NOT NULL DEFAULT 'pending',
+  agent_note VARCHAR(500) NULL,
+  decided_by INT UNSIGNED NULL,
+  created_at DATETIME NOT NULL,
+  decided_at DATETIME NULL,
+  KEY idx_deletion_status (status, created_at),
+  KEY idx_deletion_user (user_id, status),
+  CONSTRAINT fk_deletion_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+  CONSTRAINT fk_deletion_agent FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('026_demandes_suppression.sql', UTC_TIMESTAMP());
 
 -- -----------------------------------------------------------------------------
 -- Comptes de test (un par rôle, et un par type de partenaire). Changer les mots de passe en production.
