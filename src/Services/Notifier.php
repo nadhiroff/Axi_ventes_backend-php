@@ -37,7 +37,7 @@ final class Notifier
     /**
      * @param array $email [paragraphes, extra] pour EmailTemplates::message, ou [] pour le texte seul
      * @param bool $forceEmail message important (sécurité, refus d'une demande, crédit) : envoyé par email ET dans l'application, même si l'utilisateur les a désactivés
-     * @return array{app: bool, email: bool} ce qui a réellement été envoyé
+     * @return array{app: bool, email: bool} ce qui a été enregistré ou mis en file d'envoi
      */
     public static function send(int $userId, string $type, string $title, string $body, array $data = [], array $email = [], bool $forceEmail = false): array
     {
@@ -57,16 +57,19 @@ final class Notifier
             Push::toUser($userId, $title, $body, $data + ['url' => isset($data['order_id']) ? '/commande/' . $data['order_id'] : '/notifications']);
         }
         if ($prefs['email'] || $forceEmail) {
+            // Mis en file : un SMTP lent ou en panne ne bloque plus la requête, l'envoi est réessayé
             [$subject, $html, $text] = EmailTemplates::message($title, (string) $user['first_name'], $email[0] ?? [$body], $email[1] ?? []);
-            $sent['email'] = Mailer::send((string) $user['email'], $subject, $html, $text);
+            Jobs::email((string) $user['email'], $subject, $html, $text);
+            $sent['email'] = true;
         }
         return $sent;
     }
 
-    /** Email à une adresse sans compte Axi (client ajouté à la main par un commerçant) */
+    /** Email à une adresse sans compte Axi (client ajouté à la main par un commerçant), mis en file */
     public static function emailOnly(string $email, string $name, string $title, array $paragraphs, array $extra = []): bool
     {
         [$subject, $html, $text] = EmailTemplates::message($title, $name, $paragraphs, $extra);
-        return Mailer::send($email, $subject, $html, $text);
+        Jobs::email($email, $subject, $html, $text);
+        return true;
     }
 }

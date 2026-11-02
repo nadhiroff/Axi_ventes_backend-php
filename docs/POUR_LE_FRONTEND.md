@@ -19,7 +19,11 @@ ANaGeM, annonceurs, IMF) n'utilisent pas l'API : ils passent par l'espace web `/
 | Rôles | `client`, `merchant` (application) ; `partner` (web uniquement : `403 PARTNER_USE_WEB` dans l'app) |
 
 Erreurs communes : `401 UNAUTHENTICATED` (fermer la session), `403 FORBIDDEN`, `404 …_NOT_FOUND`,
-`422 VALIDATION_ERROR` (+ `fields`), `429 TOO_MANY_REQUESTS` (+ `retry_after`), `503 PAYMENT_UNAVAILABLE`.
+`422 VALIDATION_ERROR` (+ `fields`), `429 TOO_MANY_REQUESTS` (+ `retry_after`, en-tête `Retry-After` ; limite
+globale : 300 requêtes/min par session, 600/min par IP), `503 PAYMENT_UNAVAILABLE`.
+Annulation de commande (`POST /v1/orders/{id}/cancel`) : `503 PAYMENT_CHECK_UNAVAILABLE` (opérateur injoignable,
+rien n'est annulé, réessayer plus tard) et `409 PAYMENT_BEING_VERIFIED` (un paiement est en cours de vérification :
+ne pas proposer de payer à nouveau). Un paiement reçu après l'annulation réactive la commande ou ouvre un litige.
 
 ## Compte : email et mot de passe uniquement
 

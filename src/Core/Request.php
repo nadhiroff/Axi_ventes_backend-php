@@ -188,8 +188,23 @@ final class Request
         return $this->user['role'] ?? null;
     }
 
+    /**
+     * Adresse du téléphone. Derrière un répartiteur de charge ou un CDN déclaré dans trusted_proxies, l'adresse
+     * réelle est lue dans X-Forwarded-For (de droite à gauche, en sautant nos propres relais). Sans
+     * déclaration, l'en-tête est ignoré : n'importe qui pourrait l'écrire pour contourner les limites.
+     */
     public function ip(): string
     {
-        return substr((string) ($_SERVER['REMOTE_ADDR'] ?? '0.0.0.0'), 0, 45);
+        $remote = (string) ($_SERVER['REMOTE_ADDR'] ?? '0.0.0.0');
+        $trusted = (array) Config::get('trusted_proxies', []);
+        $forwarded = (string) ($_SERVER['HTTP_X_FORWARDED_FOR'] ?? '');
+        if ($forwarded !== '' && in_array($remote, $trusted, true)) {
+            foreach (array_reverse(array_map('trim', explode(',', $forwarded))) as $hop) {
+                if (filter_var($hop, FILTER_VALIDATE_IP) && !in_array($hop, $trusted, true)) {
+                    return substr($hop, 0, 45);
+                }
+            }
+        }
+        return substr($remote, 0, 45);
     }
 }

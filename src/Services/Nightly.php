@@ -33,14 +33,10 @@ final class Nightly
         ];
     }
 
-    /** Paiements en attente : statut redemandé à la passerelle (si un webhook s'est perdu) */
+    /** Paiements en attente : statut redemandé à la passerelle (si un webhook s'est perdu), plus anciens d'abord */
     private static function checkPending(): int
     {
-        $ids = array_column(Database::all("SELECT id FROM payments WHERE status = 'pending' AND payment_url IS NOT NULL AND created_at > ? LIMIT 200", [Clock::now(-48 * 3600)]), 'id');
-        foreach ($ids as $id) {
-            Escrow::refresh((int) $id);
-        }
-        return count($ids);
+        return Escrow::reconcile(200);
     }
 
     /** Relance par email (et notification) d'une commande non payée, une seule fois */
@@ -63,8 +59,12 @@ final class Nightly
         $rows = Database::all("SELECT o.id, p.id AS payment_id FROM orders o JOIN payments p ON p.order_id = o.id WHERE o.status = 'awaiting_payment' AND o.created_at < ?", [Clock::now(-3600 * Settings::int('unpaid_expiry_hours'))]);
         $n = 0;
         foreach ($rows as $row) {
-            // Dernière vérification : un paiement validé entre-temps n'est jamais annulé
-            Escrow::refresh((int) $row['payment_id']);
+            // Dernière vérification : un paiement validé entre-temps n'est jamais annulé. Passerelle en panne :
+            // on n'annule pas cette fois-ci (la prochaine tâche réessaiera)
+            $check = Escrow::check((int) $row['payment_id']);
+            if (!$check['reached']) {
+                continue;
+            }
             $done = Database::transaction(static function () use ($row): bool {
                 if (Database::run("UPDATE orders SET status = 'cancelled', cancelled_at = ? WHERE id = ? AND status = 'awaiting_payment'", [Clock::now(), $row['id']])->rowCount() === 0) {
                     return false;
