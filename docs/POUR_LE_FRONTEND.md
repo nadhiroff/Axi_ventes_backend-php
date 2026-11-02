@@ -54,9 +54,10 @@ Aucune connexion par téléphone ni par SMS. Le téléphone est un simple contac
 
 ## Devenir commerçant
 
-Tout le monde s'inscrit client. `POST /v1/me/merchant-application` (multipart) : `phone, id_type (cni|cip|passport|other),
-id_number, stall_name, merchant_type, site_id | site_other, aisle_id | aisle_other, row?, stand?` + fichiers `id_front, id_back?,
-selfie, stall_photo`. `409 APPLICATION_PENDING` si une demande attend déjà. Un agent Axi accepte ou refuse dans l'espace web ;
+Tout le monde s'inscrit client. `POST /v1/me/merchant-application` (multipart) : `phone, id_type (cni|cip|passport),
+id_number, stall_name, merchant_type, site_id | site_other, aisle_id | aisle_other, row?, stand?` + fichiers `id_front`,
+`id_back` (passeport : obligatoire ; carte d'identité et CIP : une seule photo, verso ignoré), `selfie, stall_photo`,
+`ifu` et `rccm` (PDF obligatoires, 10 Mo max, contenu vérifié : `422 INVALID_DOCUMENT` si ce n'est pas un PDF). `409 APPLICATION_PENDING` si une demande attend déjà. Un agent Axi accepte ou refuse dans l'espace web ;
 à l'acceptation : rôle `merchant`, étal créé et vérifié, email. `GET /v1/me/merchant-application` : dernière demande.
 `GET /v1/merchant/stall-options` (tout compte connecté) : listes + `other_site_id` (`autre`) et `other_aisle_id` (`autres`).
 

@@ -136,7 +136,7 @@ function becomeMerchant(string $token, string $name, string $site, string $aisle
     global $photo;
     $r = call('POST', '/v1/me/merchant-application', ['phone' => '0197' . random_int(100000, 999999), 'id_type' => 'cni', 'id_number' => 'SIM' . random_int(1000, 9999), 'stall_name' => $name,
         'merchant_type' => $type, 'site_id' => $site, 'aisle_id' => $aisle, 'row' => 'Allée S', 'stand' => '7',
-        'id_front' => new CURLFile($photo, 'image/webp'), 'selfie' => new CURLFile($photo, 'image/webp'), 'stall_photo' => new CURLFile($photo, 'image/webp')], $token, [], true);
+        'id_front' => new CURLFile($photo, 'image/webp'), 'selfie' => new CURLFile($photo, 'image/webp'), 'stall_photo' => new CURLFile($photo, 'image/webp'), 'ifu' => new CURLFile(__DIR__ . '/fixtures/document.pdf', 'application/pdf'), 'rccm' => new CURLFile(__DIR__ . '/fixtures/document.pdf', 'application/pdf')], $token, [], true);
     $applicationId = id((string) ($r['body']['data']['application']['id'] ?? 'dem_0'));
     call('POST', "/pro/demandes/$applicationId/accepter", ['_csrf' => $csrf, 'stall_name' => $name, 'site_id' => $site, 'aisle_id' => $aisle], null, [], false, true);
     return id((string) (call('GET', '/v1/me', null, $token)['body']['data']['merchant']['stall_id'] ?? 'stl_0'));
@@ -209,7 +209,7 @@ $r = call('POST', '/v1/me/merchant-application', ['phone' => '0197' . substr($st
 check('demande sans pièce d\'identité ni photos : refusée', $r['status'] === 422 && isset($r['body']['error']['fields']['id_front'], $r['body']['error']['fields']['selfie']), $r['raw']);
 $r = call('POST', '/v1/me/merchant-application', ['phone' => '0197' . substr($stamp, -6), 'id_type' => 'cni', 'id_number' => 'AB12', 'stall_name' => "Étal sim $stamp", 'merchant_type' => 'wholesale',
     'site_id' => 'yoyo', 'aisle_id' => 'autres', 'aisle_other' => "Chaussures $stamp", 'row' => 'Allée S', 'stand' => '7',
-    'id_front' => new CURLFile($photo, 'image/webp'), 'selfie' => new CURLFile($photo, 'image/webp'), 'stall_photo' => new CURLFile($photo, 'image/webp')], $merchant, [], true);
+    'id_front' => new CURLFile($photo, 'image/webp'), 'selfie' => new CURLFile($photo, 'image/webp'), 'stall_photo' => new CURLFile($photo, 'image/webp'), 'ifu' => new CURLFile(__DIR__ . '/fixtures/document.pdf', 'application/pdf'), 'rccm' => new CURLFile(__DIR__ . '/fixtures/document.pdf', 'application/pdf')], $merchant, [], true);
 $applicationId = id((string) ($r['body']['data']['application']['id'] ?? 'dem_0'));
 check('demande complète envoyée : en attente', $r['status'] === 201 && $r['body']['data']['application']['status'] === 'pending', $r['raw']);
 $idFront = (string) Database::value('SELECT id_front_path FROM merchant_applications WHERE id = ?', [$applicationId]);
@@ -241,7 +241,7 @@ check('message de félicitations vu : plus affiché', call('GET', '/v1/me', null
 check('action journalisée (admin_actions)', Database::value("SELECT COUNT(*) FROM admin_actions WHERE action = 'application.approve' AND target_id = ?", [$merchantId]) === 1);
 [$refused] = newAccount('refusee');
 $r = call('POST', '/v1/me/merchant-application', ['phone' => '0196' . substr($stamp, -6), 'id_type' => 'passport', 'id_number' => 'P9', 'stall_name' => 'Refus', 'site_other' => 'Marché de Bohicon', 'aisle_id' => 'tissus',
-    'id_front' => new CURLFile($photo, 'image/webp'), 'selfie' => new CURLFile($photo, 'image/webp'), 'stall_photo' => new CURLFile($photo, 'image/webp')], $refused, [], true);
+    'id_front' => new CURLFile($photo, 'image/webp'), 'id_back' => new CURLFile($photo, 'image/webp'), 'selfie' => new CURLFile($photo, 'image/webp'), 'stall_photo' => new CURLFile($photo, 'image/webp'), 'ifu' => new CURLFile(__DIR__ . '/fixtures/document.pdf', 'application/pdf'), 'rccm' => new CURLFile(__DIR__ . '/fixtures/document.pdf', 'application/pdf')], $refused, [], true);
 $refusedApp = id((string) ($r['body']['data']['application']['id'] ?? 'dem_0'));
 call('POST', "/pro/demandes/$refusedApp/refuser", ['_csrf' => $csrf, 'reason' => 'La pièce d\'identité est illisible.'], null, [], false, true);
 $me = call('GET', '/v1/me', null, $refused)['body']['data'] ?? [];
