@@ -156,6 +156,34 @@ check('message de la cliente pas encore lu : « Mes clients » compte 2 non lus'
 call('GET', "/v1/conversations/$conv/messages", null, $mToken);
 check('le commerçant ouvre la discussion : plus aucun non lu dans la liste', $unreadOf() === 0, var_export($unreadOf(), true));
 
+section('0b. Durée des messages changée : avis dans la discussion, comme WhatsApp');
+$systemOf = static function (string $token) use ($conv): ?array {
+    $found = null;
+    foreach (call('GET', "/v1/conversations/$conv/messages", null, $token)['body']['data']['messages'] ?? [] as $m) {
+        if ($m['kind'] === 'system') {
+            $found = $m;
+        }
+    }
+    return $found;
+};
+$unreadBefore = (int) (call('GET', '/v1/me/badges', null, $cToken)['body']['data']['unread_as_client'] ?? -1);
+$r = call('PATCH', "/v1/conversations/$conv/settings", ['retention_hours' => 48], $mToken);
+check('le commerçant passe les messages à 48 h', $r['status'] === 200 && ($r['body']['data']['conversation']['retention_hours'] ?? 0) === 48, $r['raw']);
+$mine = $systemOf($mToken);
+check('commerçant : « Vous avez réglé les messages éphémères : … 48 h … »', str_starts_with($mine['body'] ?? '', 'Vous avez réglé les messages éphémères') && str_contains($mine['body'] ?? '', '48 h'), json_encode($mine));
+$theirs = $systemOf($cToken);
+check('cliente : « {étal} a réglé les messages éphémères : … 48 h … »', str_contains($theirs['body'] ?? '', 'a réglé les messages éphémères') && str_contains($theirs['body'] ?? '', $stallName) && str_contains($theirs['body'] ?? '', '48 h'), json_encode($theirs));
+check('l\'avis n\'a ni coche ni date d\'effacement', is_array($theirs) && array_key_exists('status', $theirs) && $theirs['status'] === null && array_key_exists('expires_at', $theirs) && $theirs['expires_at'] === null, json_encode($theirs));
+check('l\'avis ne compte pas comme message non lu', (int) (call('GET', '/v1/me/badges', null, $cToken)['body']['data']['unread_as_client'] ?? -1) === $unreadBefore);
+check('l\'avis ne peut pas être modifié', call('PATCH', "/v1/conversations/$conv/messages/" . ($mine['id'] ?? 'msg_0'), ['body' => 'piraté'], $mToken)['status'] === 404);
+call('PATCH', "/v1/conversations/$conv/settings", ['retention_hours' => 48], $mToken);
+$count = 0;
+foreach (call('GET', "/v1/conversations/$conv/messages", null, $mToken)['body']['data']['messages'] ?? [] as $m) {
+    $count += (int) ($m['kind'] === 'system');
+}
+check('même durée choisie deux fois : un seul avis', $count === 1);
+call('PATCH', "/v1/conversations/$conv/settings", ['retention_hours' => 24], $mToken);
+
 section('1. La cliente bloque le commerçant');
 $r = call('POST', "/v1/users/$merchantUserId/block", [], $cToken);
 check('blocage accepté', $r['status'] === 200 && ($r['body']['data']['blocked'] ?? false) === true, $r['raw']);

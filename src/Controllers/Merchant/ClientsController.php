@@ -505,10 +505,10 @@ final class ClientsController
             // Compte bloqué par Axi : pas de profil ni de discussion ; il revient seul au déblocage
             'unavailable' => $user !== null && $user['status'] !== 'active',
             'last_message' => $last === null ? null : [
-                'preview' => $last['deleted_at'] !== null ? '🚫 Message supprimé' : match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', 'video' => '🎥 Vidéo', default => mb_substr((string) $last['body'], 0, 80) },
-                'mine' => (int) $last['sender_id'] !== (int) $c['user_id'],
+                'preview' => $last['deleted_at'] !== null ? '🚫 Message supprimé' : match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', 'video' => '🎥 Vidéo', 'system' => '🕒 Messages éphémères : ' . \Axi\Services\Messaging::label((int) $last['body']), default => mb_substr((string) $last['body'], 0, 80) },
+                'mine' => $last['kind'] !== 'system' && (int) $last['sender_id'] !== (int) $c['user_id'],
                 // Coches du dernier message envoyé par le commerçant : ✓ envoyé, ✓✓ reçu, ✓✓ bleu vu par le client
-                'status' => (int) $last['sender_id'] === (int) $c['user_id'] ? null : match (true) {
+                'status' => (int) $last['sender_id'] === (int) $c['user_id'] || $last['kind'] === 'system' ? null : match (true) {
                     (int) $last['client_read_msg_id'] >= (int) $last['id'] => 'read',
                     (int) $last['client_delivered_msg_id'] >= (int) $last['id'] => 'delivered',
                     default => 'sent',

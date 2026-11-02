@@ -52,7 +52,7 @@ final class Messaging
             Database::run('UPDATE conversations SET retention_hours = ? WHERE id = ?', [$hours, $conversationId]);
             Database::run(
                 'UPDATE messages SET expires_at = DATE_ADD(created_at, INTERVAL ? HOUR)
-                 WHERE conversation_id = ? AND (expires_at IS NULL OR expires_at > UTC_TIMESTAMP())',
+                 WHERE conversation_id = ? AND kind <> \'system\' AND (expires_at IS NULL OR expires_at > UTC_TIMESTAMP())',
                 [$hours, $conversationId],
             );
         });
