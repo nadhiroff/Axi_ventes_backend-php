@@ -105,12 +105,16 @@ final class Merchants
             . '<dt>Compte</dt><dd>' . ($s['user_status'] === 'active' && $s['status'] === 'active' ? View::badge('Actif', 'ok') : View::badge('Suspendu', 'danger')) . '</dd>'
             . '<dt>Inscrit le</dt><dd>' . View::date($s['created_at'], false) . '</dd></dl>'
             . ($s['verification_photo_path'] !== null ? '<p><img class="photo" alt="Photo de vérification" src="' . View::e(Url::asset($s['verification_photo_path'] . '/medium.webp')) . '"></p>' : '')
+            . '<p><a href="' . View::url('/pro/clients/' . $s['user_id']) . '">Fiche du compte (connexions, commandes, modifications) →</a></p>'
             . '<div class="actions">'
+            // Bloquer à tout moment, même sans signalement : le motif est demandé et montré au commerçant
             . ($s['user_status'] === 'active' && $s['status'] === 'active'
-                ? View::action("$base/suspendre", 'Suspendre le commerçant', [], 'Êtes-vous sûr de vouloir suspendre ce commerçant ? Son étal ne sera plus visible.', 'btn danger')
-                : View::action("$base/activer", 'Réactiver le commerçant', [], 'Réactiver ce commerçant et son étal ?', 'btn ok'))
+                ? Clients::blockPopup("$base/suspendre", $s['owner'])
+                : View::action("$base/activer", 'Débloquer le commerçant', [], 'Réactiver ce commerçant et son étal ? Il est prévenu par email et dans l\'application.', 'btn ok'))
             . ($s['verified_at'] !== null ? View::action("$base/retirer-badge", 'Retirer le badge', [], 'Retirer le badge « vérifié » de cet étal ?', 'btn ghost') : '')
-            . '</div></div>';
+            . '</div>'
+            . ($s['user_status'] !== 'active' && $s['suspended_reason'] !== null ? '<p class="muted small">Motif du blocage : ' . View::e($s['suspended_reason']) . '</p>' : '')
+            . '</div>';
 
         $application = Database::value('SELECT id FROM merchant_applications WHERE user_id = ? AND status = \'approved\' ORDER BY id DESC LIMIT 1', [$s['user_id']]);
         $verify = '<div class="card"><h2>Vérification sur place</h2>'
@@ -178,7 +182,10 @@ final class Merchants
             '<a href="' . View::url('/pro/commandes/' . $o['order_id']) . '">n° ' . (int) $o['order_id'] . '</a>', View::date($o['created_at']), View::e($o['client']), View::fcfa($o['items_total']), Orders::escrowBadge($o['escrow_state']),
         ], $orders), 'Aucune commande.');
 
-        Html::page($s['name'], $money . '<div class="row2">' . $info . $verify . '</div><div class="row2">' . $edit . $sub . '</div>' . $productsHtml . $ordersHtml, 'Fiche commerçant');
+        // Documents envoyés avec la demande (pièce, selfie, IFU, RCCM) et historique des modifications
+        $docs = Applications::documentsCard((int) $s['user_id']);
+        $history = Clients::historyCard((int) $s['user_id']);
+        Html::page($s['name'], $money . '<div class="row2">' . $info . $verify . '</div>' . $docs . $history . '<div class="row2">' . $edit . $sub . '</div>' . $productsHtml . $ordersHtml, 'Fiche commerçant');
     }
 
     public function verify(Request $req): never
@@ -249,6 +256,7 @@ final class Merchants
             $columns += ['moved_at' => Clock::now(), 'relocation_sent_at' => null, 'verified_at' => Clock::now(), 'verified_by' => $agent['id']];
         }
         Database::updateById('stalls', (int) $s['id'], $columns + ['updated_at' => Clock::now()]);
+        \Axi\Services\ProfileChanges::recordStall($s, $columns, 'agent', (int) $agent['id']);
         $this->log($req, $agent, 'stall.update', (int) $s['id'], $columns);
         View::redirect('/pro/commercants/' . $s['id'], 'Étal mis à jour.');
     }
@@ -307,8 +315,13 @@ final class Merchants
         $agent = WebAuth::require(['axi']);
         WebAuth::checkCsrf();
         $s = $this->stall((int) ($req->params['id'] ?? 0));
+        // Blocage possible à tout moment, sans signalement préalable ; le motif est montré au commerçant
+        $reason = trim((string) ($_POST['reason'] ?? ''));
+        if ($status === 'suspended' && mb_strlen($reason) < 5) {
+            View::redirect('/pro/commercants/' . $s['id'], 'Indiquez le motif du blocage : il est montré au commerçant.', 'err');
+        }
         // Même chemin que partout ailleurs : compte, étal, déconnexion et personne prévenue
-        Clients::applyStatus($req, $agent, (int) $s['user_id'], $status, $status === 'suspended' ? 'Compte suspendu par l\'équipe Axi.' : '');
+        Clients::applyStatus($req, $agent, (int) $s['user_id'], $status, $reason);
         $this->log($req, $agent, 'merchant.' . ($status === 'active' ? 'activate' : 'suspend'), (int) $s['id']);
         View::redirect(($_POST['back'] ?? '') === 'list' ? '/pro/commercants?state=suspended' : '/pro/commercants/' . $s['id'], $status === 'active' ? 'Commerçant réactivé.' : 'Commerçant suspendu : son étal n\'est plus visible.');
     }
@@ -316,7 +329,7 @@ final class Merchants
     private function stall(int $id): array
     {
         return Database::one(
-            'SELECT s.*, u.name AS owner, u.email, u.status AS user_status, si.name AS site_name, si.map_url AS site_map_url, a.name AS aisle
+            'SELECT s.*, u.name AS owner, u.email, u.status AS user_status, u.suspended_reason, si.name AS site_name, si.map_url AS site_map_url, a.name AS aisle
              FROM stalls s JOIN users u ON u.id = s.user_id JOIN sites si ON si.id = s.site_id JOIN aisles a ON a.id = s.aisle_id WHERE s.id = ?',
             [$id],
         ) ?? throw new HttpException(404, 'NOT_FOUND', 'Commerçant introuvable.');

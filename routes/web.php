@@ -8,6 +8,7 @@ use Axi\Web\Controllers\AuthPages;
 use Axi\Web\Controllers\Campaigns;
 use Axi\Web\Controllers\Clients;
 use Axi\Web\Controllers\Credits;
+use Axi\Web\Controllers\Deletions;
 use Axi\Web\Controllers\Market;
 use Axi\Web\Controllers\Merchants;
 use Axi\Web\Controllers\Money;
@@ -63,6 +64,10 @@ return static function (Router $r): void {
     $r->get('/pro/clients/{id}', [Clients::class, 'show']);
     $r->post('/pro/clients/{id}/suspendre', [Clients::class, 'suspend']);
     $r->post('/pro/clients/{id}/activer', [Clients::class, 'activate']);
+
+    $r->get('/pro/suppressions', [Deletions::class, 'index']);
+    $r->post('/pro/suppressions/{id}/effacer', [Deletions::class, 'erase']);
+    $r->post('/pro/suppressions/{id}/annuler', [Deletions::class, 'cancel']);
 
     $r->get('/pro/commandes', [Orders::class, 'index']);
     $r->get('/pro/commandes/{id}', [Orders::class, 'show']);

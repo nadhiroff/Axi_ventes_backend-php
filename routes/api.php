@@ -56,9 +56,14 @@ return static function (Router $r): void {
     $r->get('/v1/me/login-history', [AccountController::class, 'loginHistory'], $user);
     $r->get('/v1/me/consents', [AccountController::class, 'consents'], $user);
     $r->delete('/v1/me/consents/{id}', [AccountController::class, 'revokeConsent'], $user);
+    // Mes données : affichées dans l'application, puis enregistrées ou partagées en fichier
+    $r->get('/v1/me/data', [AccountController::class, 'data'], $user);
     $r->post('/v1/me/export', [AccountController::class, 'exportLink'], $user);
     $r->get('/v1/me/export.json', [AccountController::class, 'export']);
+    // Suppression du compte : demande (mot de passe + raison) traitée par l'équipe Axi ; annulable tant qu'elle attend
     $r->post('/v1/me/delete', [AccountController::class, 'deleteAccount'], $user);
+    $r->get('/v1/me/deletion-request', [AccountController::class, 'deletionRequest'], $user);
+    $r->delete('/v1/me/deletion-request', [AccountController::class, 'cancelDeletionRequest'], $user);
     $r->post('/v1/me/avatar', [AccountController::class, 'avatar'], $user);
     $r->delete('/v1/me/avatar', [AccountController::class, 'deleteAvatar'], $user);
     $r->get('/v1/me/badges', [MessagesController::class, 'badges'], $user);
@@ -80,6 +85,10 @@ return static function (Router $r): void {
     $r->post('/v1/conversations/{id}/messages/{message}/hide', [MessagesController::class, 'hide'], $user);
     $r->get('/v1/users/{id}/profile', [ProfileController::class, 'show'], $user);
     $r->post('/v1/users/{id}/report', [ProfileController::class, 'report'], $user);
+    // Bloquer / débloquer quelqu'un qui me dérange ; liste des personnes que j'ai bloquées
+    $r->post('/v1/users/{id}/block', [ProfileController::class, 'block'], $user);
+    $r->delete('/v1/users/{id}/block', [ProfileController::class, 'unblock'], $user);
+    $r->get('/v1/me/blocked-users', [ProfileController::class, 'blocked'], $user);
     $r->post('/v1/stalls/{id}/conversation', [MessagesController::class, 'openWithStall'], $user);
     $r->post('/v1/merchant/clients/{id}/conversation', [MessagesController::class, 'openWithClient'], $merchant);
     $r->get('/v1/notifications', [AccountController::class, 'notifications'], $user);

@@ -8,6 +8,7 @@ use Axi\Core\Database;
 use Axi\Core\HttpException;
 use Axi\Core\Request;
 use Axi\Services\AdminLog;
+use Axi\Services\ProfileChanges;
 use Axi\Web\Html;
 use Axi\Web\View;
 use Axi\Web\WebAuth;
@@ -35,9 +36,14 @@ final class Clients
             $where[] = 'u.status = ?';
             $params[] = $s;
         }
+        // Comptes dont la personne a elle-même changé son nom ou celui de son étal (pseudonyme, usurpation…)
+        if (($_GET['changed'] ?? '') === 'identity') {
+            $where[] = "EXISTS (SELECT 1 FROM profile_changes c WHERE c.user_id = u.id AND c.source = 'app' AND c.field IN ('first_name', 'last_name', 'stall_name'))";
+        }
         $page = View::page();
         $rows = Database::all(
             'SELECT u.*, (SELECT COUNT(*) FROM orders o WHERE o.client_id = u.id AND o.status <> \'awaiting_payment\' AND o.status <> \'cancelled\') AS orders,
+                    (SELECT COUNT(*) FROM profile_changes c WHERE c.user_id = u.id AND c.source = \'app\' AND c.field IN (\'first_name\', \'last_name\', \'stall_name\')) AS name_changes,
                     (SELECT COALESCE(SUM(total),0) FROM orders o WHERE o.client_id = u.id AND o.paid_at IS NOT NULL) AS spent
              FROM users u WHERE ' . implode(' AND ', $where) . ' ORDER BY u.id DESC LIMIT ' . (self::PER_PAGE + 1) . ' OFFSET ' . (($page - 1) * self::PER_PAGE),
             $params,
@@ -46,14 +52,17 @@ final class Clients
             'q' => ['Nom, email ou téléphone', 'search', null],
             'role' => ['Profil', 'select', ['' => 'Tous', 'client' => 'Clients', 'merchant' => 'Commerçants']],
             'status' => ['Accès', 'select', ['' => 'Tous', 'active' => 'Actifs', 'suspended' => 'Bloqués']],
+            'changed' => ['Modifications', 'select', ['' => 'Toutes', 'identity' => 'Nom ou étal renommé']],
         ])
             . Html::table(['Personne', 'Email', 'Profil', '#Commandes', 'Inscrit le', 'Accès'], array_map(static fn (array $u): array => [
-                '<a href="' . View::url('/pro/clients/' . $u['id']) . '"><strong>' . View::e($u['name']) . '</strong></a>', View::e($u['email']) . ($u['email_verified_at'] ? '' : ' ' . View::badge('non confirmé', 'warn')),
+                '<a href="' . View::url('/pro/clients/' . $u['id']) . '"><strong>' . View::e($u['name']) . '</strong></a>'
+                    . ((int) $u['name_changes'] > 0 ? ' ' . View::badge('Nom modifié ×' . (int) $u['name_changes'], 'warn') : ''),
+                View::e($u['email']) . ($u['email_verified_at'] ? '' : ' ' . View::badge('non confirmé', 'warn')),
                 $u['role'] === 'merchant' ? View::badge('Commerçant', 'warn') : View::badge('Client'), (string) $u['orders'], View::date($u['created_at'], false),
                 $u['status'] === 'active' ? View::badge('Actif', 'ok') : View::badge('Bloqué', 'danger') . ' ' . View::action('/pro/clients/' . $u['id'] . '/activer', 'Débloquer', ['back' => 'list'], 'Cette personne pourra de nouveau utiliser Axi. Elle est prévenue par email et dans l\'application.', 'btn ok sm'),
             ], array_slice($rows, 0, self::PER_PAGE)), 'Aucun utilisateur.')
-            . View::pager('/pro/clients', array_intersect_key($_GET, array_flip(['q', 'status', 'role'])), $page, count($rows) > self::PER_PAGE),
-            'Clients et commerçants : bloquer ou débloquer l\'accès à l\'application, avec un motif envoyé à la personne.');
+            . View::pager('/pro/clients', array_intersect_key($_GET, array_flip(['q', 'status', 'role', 'changed'])), $page, count($rows) > self::PER_PAGE),
+            'Clients et commerçants : bloquer ou débloquer l\'accès à tout moment (même sans signalement), avec un motif envoyé à la personne. « Nom modifié » : la personne a changé son nom ou celui de son étal.');
     }
 
     public function show(Request $req): never
@@ -62,9 +71,14 @@ final class Clients
         $u = $this->client((int) ($req->params['id'] ?? 0));
         $orders = Database::all('SELECT * FROM orders WHERE client_id = ? ORDER BY id DESC LIMIT 50', [$u['id']]);
         $disputes = (int) Database::value('SELECT COUNT(*) FROM disputes WHERE client_id = ?', [$u['id']]);
-        $logins = Database::all('SELECT * FROM login_events WHERE user_id = ? ORDER BY id DESC LIMIT 10', [$u['id']]);
+        $logins = Database::all('SELECT * FROM login_events WHERE user_id = ? AND created_at > ? ORDER BY id DESC LIMIT 10', [$u['id'], \Axi\Core\Clock::now(-\Axi\Services\Nightly::LOGIN_HISTORY_DAYS * 86400)]);
         $base = '/pro/clients/' . $u['id'];
-        $body = '<div class="row2"><div class="card"><dl><dt>Email</dt><dd>' . View::e($u['email']) . '</dd><dt>Téléphone</dt><dd>' . View::e($u['phone'] ?? '—') . '</dd>'
+        $deletion = Deletions::pendingFor((int) $u['id']);
+        $body = ($deletion !== null
+                ? '<div class="card" style="border-color:var(--danger)"><h2>' . View::badge('Demande de suppression', 'danger') . '</h2><p>Envoyée le ' . View::date($deletion['created_at'])
+                    . '. Raison : <strong>' . View::e((string) $deletion['reason']) . '</strong></p><p><a class="btn sm" href="' . View::url('/pro/suppressions') . '">Traiter dans Suppressions de compte →</a></p></div>'
+                : '')
+            . '<div class="row2"><div class="card"><dl><dt>Email</dt><dd>' . View::e($u['email']) . '</dd><dt>Téléphone</dt><dd>' . View::e($u['phone'] ?? '—') . '</dd>'
             . '<dt>Langue</dt><dd>' . View::e($u['lang']) . '</dd><dt>Inscrit le</dt><dd>' . View::date($u['created_at']) . '</dd><dt>Litiges</dt><dd>' . $disputes . '</dd>'
             . '<dt>Profil</dt><dd>' . ($u['role'] === 'merchant' ? 'Commerçant' : 'Client') . '</dd>'
             . '<dt>Signalements</dt><dd>' . (int) Database::value('SELECT COUNT(*) FROM reports WHERE target_user_id = ?', [$u['id']]) . '</dd>'
@@ -74,11 +88,52 @@ final class Clients
                 ? self::blockForm("$base/suspendre")
                 : '<p class="muted">La personne pourra de nouveau se connecter. Elle est prévenue par email.</p>' . View::action("$base/activer", 'Débloquer l\'accès', [], 'Cette personne pourra de nouveau utiliser Axi.', 'btn ok'))
             . '</div>'
-            . '</div><div class="card"><h2>Dernières connexions</h2>' . Html::table(['Date', 'Résultat', 'Appareil'], array_map(static fn (array $l): array => [View::date($l['created_at']), $l['success'] ? View::badge('Réussie', 'ok') : View::badge('Refusée', 'danger'), View::e($l['device'] ?? '')], $logins)) . '</div>'
+            . '</div>'
+            . ($u['role'] === 'merchant' ? self::merchantLinks((int) $u['id']) : '')
+            . self::historyCard((int) $u['id'])
+            . '<div class="card"><h2>Dernières connexions (7 jours)</h2>' . Html::table(['Date', 'Résultat', 'Appareil'], array_map(static fn (array $l): array => [View::date($l['created_at']), $l['success'] ? View::badge('Réussie', 'ok') : View::badge('Refusée', 'danger'), View::e($l['device'] ?? '')], $logins), 'Aucune connexion ces 7 derniers jours.') . '</div>'
             . '<h2>Commandes</h2>' . Html::table(['Commande', 'Date', '#Total', 'Statut'], array_map(static fn (array $o): array => [
                 '<a href="' . View::url('/pro/commandes/' . $o['id']) . '">n° ' . (int) $o['id'] . '</a>', View::date($o['created_at']), View::fcfa($o['total']), Orders::orderBadge($o['status']),
             ], $orders), 'Aucune commande.');
         Html::page($u['name'], $body, $u['role'] === 'merchant' ? 'Fiche utilisateur (commerçant)' : 'Fiche utilisateur (client)');
+    }
+
+    /**
+     * Historique des modifications du profil et de l'étal : avant, après, par qui, quand. Les changements de nom
+     * faits par la personne elle-même sont mis en évidence (pseudonyme, nom d'un autre).
+     */
+    public static function historyCard(int $userId): string
+    {
+        $rows = ProfileChanges::forUser($userId, 60);
+        $value = static function (array $c, string $key): string {
+            $v = $c[$key];
+            if ($v === null) {
+                return '<span class="muted">—</span>';
+            }
+            if (in_array($c['field'], ['avatar', 'stall_photo'], true)) {
+                return '<a href="' . View::e(\Axi\Core\Url::asset($v . '/medium.webp')) . '" target="_blank" rel="noopener">voir la photo</a>';
+            }
+            return View::e(mb_strimwidth($v, 0, 120, '…'));
+        };
+        $identity = ProfileChanges::identityChanges($userId);
+        return '<div class="card"><h2>Modifications du profil' . ($identity > 0 ? ' ' . View::badge('Nom modifié ×' . $identity, 'warn') : '') . '</h2>'
+            . '<p class="note">Tout changement de nom, de téléphone, de photo, du nom ou de l\'emplacement de l\'étal est gardé ici. Vérifiez qu\'un nom n\'a pas été remplacé par un pseudonyme ou par le nom d\'une autre personne.</p>'
+            . Html::table(['Date', 'Information', 'Avant', 'Après', 'Par'], array_map(static fn (array $c): array => [
+                View::date($c['created_at']),
+                View::e(ProfileChanges::LABELS[$c['field']] ?? $c['field']) . ($c['source'] === 'app' && in_array($c['field'], ProfileChanges::IDENTITY, true) ? ' ' . View::badge('identité', 'warn') : ''),
+                $value($c, 'old_value'),
+                '<strong>' . $value($c, 'new_value') . '</strong>',
+                $c['source'] === 'agent' ? 'Agent ' . View::e($c['actor_name'] ?? '') : 'La personne (application)',
+            ], $rows), 'Aucune modification depuis la mise en place de l\'historique.')
+            . '</div>';
+    }
+
+    /** Commerçant : lien vers la fiche de l'étal et ses documents (pièce d'identité, IFU, RCCM) */
+    private static function merchantLinks(int $userId): string
+    {
+        $stallId = Database::value('SELECT id FROM stalls WHERE user_id = ?', [$userId]);
+        return ($stallId !== null ? '<p><a href="' . View::url('/pro/commercants/' . $stallId) . '">Fiche de l\'étal →</a></p>' : '')
+            . Applications::documentsCard($userId);
     }
 
     public function suspend(Request $req): never

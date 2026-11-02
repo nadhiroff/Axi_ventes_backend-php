@@ -33,10 +33,16 @@ final class ApplicationController
         'aisle_other' => 'Nom de l\'allée',
         'row' => 'Rangée',
         'stand' => 'Numéro de stand',
-        'id_front' => 'Pièce d\'identité (recto)',
+        'id_front' => 'Pièce d\'identité',
+        'id_back' => 'Pièce d\'identité (verso)',
         'selfie' => 'Photo de vous',
         'stall_photo' => 'Photo de l\'étal',
+        'ifu' => 'IFU',
+        'rccm' => 'RCCM',
     ];
+
+    /** Passeport : recto ET verso ; carte d'identité et CIP : une seule photo (le verso éventuel est ignoré) */
+    private const TWO_SIDED = ['passport'];
 
     public function show(Request $req): never
     {
@@ -44,7 +50,10 @@ final class ApplicationController
         Response::ok(['application' => $row === null ? null : self::present($row)]);
     }
 
-    /** POST multipart : champs ci-dessus + fichiers id_front, id_back (facultatif), selfie, stall_photo */
+    /**
+     * POST multipart : champs ci-dessus + fichiers id_front, id_back (passeport seulement, alors obligatoire),
+     * selfie, stall_photo, ifu et rccm (PDF obligatoires pour vendre au Bénin)
+     */
     public function create(Request $req): never
     {
         if ($req->user['role'] !== 'client') {
@@ -85,24 +94,33 @@ final class ApplicationController
         [$siteId, $siteOther] = self::choice($in, 'site', 'SELECT id FROM sites WHERE id = ? AND active = 1', 'Choisissez votre marché ou écrivez son nom dans « Autre ».');
         [$aisleId, $aisleOther] = self::choice($in, 'aisle', 'SELECT id FROM aisles WHERE id = ? AND active = 1', 'Choisissez votre allée ou écrivez son nom dans « Autre ».');
 
+        // Tout est vérifié AVANT d'enregistrer le moindre fichier : une demande refusée ne laisse rien sur le disque
+        $twoSided = in_array($in['id_type'], self::TWO_SIDED, true);
         $missing = [];
-        foreach (['id_front', 'selfie', 'stall_photo'] as $field) {
+        foreach (['id_front', 'selfie', 'stall_photo', ...($twoSided ? ['id_back'] : [])] as $field) {
             if ($req->file($field) === null) {
                 $missing[$field] = 'Ajoutez cette photo.';
+            }
+        }
+        foreach (['ifu', 'rccm'] as $field) {
+            if ($req->file($field) === null) {
+                $missing[$field] = 'Ajoutez ce document en PDF.';
             }
         }
         if ($missing !== []) {
             Validator::fail($missing, self::LABELS);
         }
+        $ifu = Uploads::privateDocument($req->file('ifu'), 'applications', 'L\'IFU');
+        $rccm = Uploads::privateDocument($req->file('rccm'), 'applications', 'Le RCCM');
         $front = Uploads::privatePhoto($req->file('id_front'), 'applications');
-        $back = $req->file('id_back') === null ? null : Uploads::privatePhoto($req->file('id_back'), 'applications');
+        $back = $twoSided ? Uploads::privatePhoto($req->file('id_back'), 'applications') : null;
         $selfie = Uploads::privatePhoto($req->file('selfie'), 'applications');
         $stallPhoto = Uploads::photo($req->file('stall_photo'))['path'];
 
         Database::insert(
-            'INSERT INTO merchant_applications (user_id, phone, other_phones, id_type, id_number, id_front_path, id_back_path, selfie_path, stall_photo_path, stall_name, merchant_type, site_id, site_other, aisle_id, aisle_other, row_label, stand, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [$req->userId(), $in['phone'], $others === [] ? null : implode(',', $others), $in['id_type'], $in['id_number'], $front, $back, $selfie, $stallPhoto, $in['stall_name'], $in['merchant_type'] ?? 'retail',
+            'INSERT INTO merchant_applications (user_id, phone, other_phones, id_type, id_number, id_front_path, id_back_path, selfie_path, ifu_path, rccm_path, stall_photo_path, stall_name, merchant_type, site_id, site_other, aisle_id, aisle_other, row_label, stand, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [$req->userId(), $in['phone'], $others === [] ? null : implode(',', $others), $in['id_type'], $in['id_number'], $front, $back, $selfie, $ifu, $rccm, $stallPhoto, $in['stall_name'], $in['merchant_type'] ?? 'retail',
                 $siteId, $siteOther, $aisleId, $aisleOther, $in['row'] ?? null, $in['stand'] ?? null, Clock::now()],
         );
         if ($req->user['phone'] === null && Database::value('SELECT id FROM users WHERE phone = ?', [$in['phone']]) === null) {

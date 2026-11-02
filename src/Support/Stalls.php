@@ -21,6 +21,10 @@ final class Stalls
      */
     public static function query(string $where = '1', array $params = [], string $suffix = '', bool $includeInactive = false): array
     {
+        // Étal d'un utilisateur bloqué (dans un sens ou dans l'autre) : invisible pour la personne connectée
+        [$notBlocked, $blockedIds] = Blocks::excludeSql('s.user_id');
+        $where = '(' . $where . ') AND ' . $notBlocked;
+        $params = [...$params, ...$blockedIds];
         $sql = 'SELECT s.*, IF(s.site_id = \'autre\' AND s.site_other IS NOT NULL, s.site_other, si.name) AS site_name, si.map_url AS site_map_url, u.name AS owner_name, u.status AS owner_status,
                   EXISTS (SELECT 1 FROM products p WHERE p.stall_id = s.id AND ' . self::VISIBLE . ' AND p.created_at > ?) AS has_new,
                   EXISTS (SELECT 1 FROM subscriptions x WHERE x.stall_id = s.id AND x.status = \'active\' AND x.ends_on >= CURDATE()) AS subscribed

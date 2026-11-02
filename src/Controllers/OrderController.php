@@ -297,11 +297,13 @@ final class OrderController
         $ids = array_values(array_filter(array_column($lines, 'product_id')));
         $products = [];
         if ($ids !== []) {
+            // Commerçant bloqué (dans un sens ou dans l'autre) : ses produits sont indisponibles pour ce client
+            [$notBlocked, $blockedIds] = \Axi\Support\Blocks::excludeSql('s.user_id');
             foreach (Database::all(
                 'SELECT p.* FROM products p JOIN stalls s ON s.id = p.stall_id JOIN users u ON u.id = s.user_id
                  WHERE p.id IN (' . Database::in($ids) . ') AND ' . Stalls::VISIBLE . ' AND p.in_stock = 1 AND p.price_amount IS NOT NULL
-                   AND s.status = \'active\' AND u.status = \'active\'',
-                $ids,
+                   AND s.status = \'active\' AND u.status = \'active\' AND ' . $notBlocked,
+                [...$ids, ...$blockedIds],
             ) as $p) {
                 $products[(int) $p['id']] = $p;
             }

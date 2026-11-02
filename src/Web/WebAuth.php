@@ -32,6 +32,7 @@ final class WebAuth
         ['/pro/commercants', 'Commerçants'],
         ['/pro/clients', 'Utilisateurs'],
         ['/pro/signalements', 'Signalements'],
+        ['/pro/suppressions', 'Suppressions de compte'],
         ['/pro/commandes', 'Commandes et litiges'],
         ['/pro/paiements', 'Paiements et versements'],
         ['/pro/allees', 'Allées et marchés'],

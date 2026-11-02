@@ -27,7 +27,10 @@ final class RateLimiter
             }
         }
         $window = intdiv(time(), 60);
-        $limits = ['ip:' . $request->ip() => (int) ($config['per_ip_per_minute'] ?? 600)];
+        // Développement : la machine elle-même (tests automatiques lancés à la suite) n'a pas de limite par IP ;
+        // la limite par session s'applique toujours. En production, aucune exception.
+        $loopback = Config::isLocal() && in_array($request->ip(), ['127.0.0.1', '::1'], true);
+        $limits = $loopback ? [] : ['ip:' . $request->ip() => (int) ($config['per_ip_per_minute'] ?? 600)];
         $token = $request->bearerToken();
         if ($token !== null) {
             $limits['tok:' . hash('sha256', $token)] = (int) ($config['per_session_per_minute'] ?? 300);

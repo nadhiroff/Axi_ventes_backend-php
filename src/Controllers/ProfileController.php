@@ -10,6 +10,7 @@ use Axi\Core\Ids;
 use Axi\Core\Request;
 use Axi\Core\Response;
 use Axi\Core\Validator;
+use Axi\Support\Blocks;
 use Axi\Support\Stalls;
 use Axi\Support\Users;
 
@@ -32,6 +33,10 @@ final class ProfileController
             throw new HttpException(404, 'ACCOUNT_UNAVAILABLE', 'Ce compte n\'est plus disponible.');
         }
         if ($id !== $me && !$this->related($me, $id) && !$this->foundByContact($me, $u, (string) $req->query('contact', ''))) {
+            throw new HttpException(404, 'USER_NOT_FOUND', 'Profil introuvable.');
+        }
+        // Blocage dans un sens ou dans l'autre : aucun profil, comme s'il n'existait pas
+        if (Blocks::between($me, $id)) {
             throw new HttpException(404, 'USER_NOT_FOUND', 'Profil introuvable.');
         }
         $stall = $u['role'] === 'merchant' ? Stalls::findByUser($id) : null;
@@ -72,6 +77,55 @@ final class ProfileController
             [$me, $id, $conv, $in['reason'], $in['details'] ?? null, Clock::now()],
         );
         Response::ok(['message' => 'Merci. L\'équipe Axi examine ce signalement et bloquera ce compte s\'il ne respecte pas les règles.'], 201);
+    }
+
+    /**
+     * Bloquer quelqu'un qui me dérange (sans passer par l'équipe Axi). Les deux ne se voient plus nulle part et
+     * ne peuvent plus s'écrire ni se commander quoi que ce soit ; la personne bloquée n'est pas prévenue.
+     */
+    public function block(Request $req): never
+    {
+        $me = $req->userId();
+        $id = $this->otherUser($req);
+        Blocks::block($me, $id);
+        Response::ok(['blocked' => true, 'message' => 'Personne bloquée. Vous ne verrez plus rien d\'elle, et elle ne pourra plus vous écrire ni voir votre profil. Débloquez-la quand vous voulez dans Paramètres > Utilisateurs bloqués.']);
+    }
+
+    public function unblock(Request $req): never
+    {
+        Blocks::unblock($req->userId(), $req->id('usr', 'USER_NOT_FOUND', 'Profil introuvable.'));
+        Response::ok(['blocked' => false, 'message' => 'Personne débloquée. Vos discussions et son étal réapparaissent.']);
+    }
+
+    /** Les personnes que j'ai bloquées (pas celles qui m'ont bloqué, qui ne doivent pas le savoir) */
+    public function blocked(Request $req): never
+    {
+        $rows = Database::all(
+            'SELECT u.*, b.created_at AS blocked_at, s.name AS stall_name FROM user_blocks b JOIN users u ON u.id = b.blocked_id
+             LEFT JOIN stalls s ON s.user_id = u.id WHERE b.blocker_id = ? ORDER BY b.created_at DESC',
+            [$req->userId()],
+        );
+        Response::ok(['users' => array_map(static fn (array $u): array => [
+            'id' => Ids::encode('usr', $u['id']),
+            'display_name' => $u['status'] === 'deleted' ? 'Compte supprimé' : trim($u['first_name'] . ' ' . mb_substr($u['last_name'], 0, 1) . '.'),
+            'avatar' => Users::avatarFor($u, $req->userId(), true),
+            'role' => $u['role'],
+            'stall_name' => $u['stall_name'],
+            'blocked_at' => Clock::iso($u['blocked_at']),
+        ], $rows)]);
+    }
+
+    /** Un autre compte client ou commerçant qui existe (moi exclu) */
+    private function otherUser(Request $req): int
+    {
+        $id = $req->id('usr', 'USER_NOT_FOUND', 'Profil introuvable.');
+        if ($id === $req->userId()) {
+            throw new HttpException(422, 'CANNOT_BLOCK_SELF', 'Vous ne pouvez pas vous bloquer vous-même.');
+        }
+        if (Database::value("SELECT id FROM users WHERE id = ? AND role IN ('client','merchant') AND status <> 'deleted'", [$id]) === null) {
+            throw new HttpException(404, 'USER_NOT_FOUND', 'Profil introuvable.');
+        }
+        return $id;
     }
 
     public static function reasonLabel(string $reason): string

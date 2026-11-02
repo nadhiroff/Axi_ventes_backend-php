@@ -12,7 +12,7 @@
 SET NAMES utf8mb4;
 SET time_zone = '+00:00';
 SET FOREIGN_KEY_CHECKS = 0;
-DROP TABLE IF EXISTS payment_duplicates, rate_limits, worker_heartbeats, outbox_jobs, campaign_reports, credit_repayments, sales_hidden, push_tokens, stall_announcement_photos, stall_emails, stall_announcements, reports, message_hidden, stall_photos, messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
+DROP TABLE IF EXISTS account_deletion_requests, user_blocks, profile_changes, payment_duplicates, rate_limits, worker_heartbeats, outbox_jobs, campaign_reports, credit_repayments, sales_hidden, push_tokens, stall_announcement_photos, stall_emails, stall_announcements, reports, message_hidden, stall_photos, messages, conversations, merchant_applications, admin_actions, credits, data_sharing_consents, campaigns, broadcasts, merchant_clients, payouts, disputes, refunds, webhook_events, payment_events, payments, subscriptions, order_items, order_stalls, orders, axi_points, agent_visit_requests, voice_messages, product_views, favorites, stall_follows, product_images, products, stalls, price_stats_daily, product_refs, aisles, sites, notifications, user_settings, login_events, email_codes, auth_tokens, users, organizations, settings, otp_codes, login_failures, cart_items, sms_queue, stall_moves, catalog_items, promotions, delivery_options, stall_orders, merchant_customers, payout_requests, credit_offers, credit_requests, follows, markets, schema_migrations;
 SET FOREIGN_KEY_CHECKS = 1;
 
 CREATE TABLE schema_migrations (
@@ -1307,6 +1307,110 @@ ALTER TABLE payouts
   MODIFY COLUMN status ENUM('processing','pending','simulated','paid','failed') NOT NULL DEFAULT 'pending';
 
 INSERT INTO schema_migrations (file, applied_at) VALUES ('022_paiements_fiables.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 023_ifu_rccm.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 023 : documents obligatoires pour vendre au Bénin, joints à la demande « Devenir commerçant » :
+--   IFU (Identifiant Fiscal Unique) et RCCM (Registre du Commerce et du Crédit Mobilier), en PDF.
+--   Gardés hors de public/, lus uniquement par un agent Axi connecté.
+--   NULL pour les demandes envoyées avant cette version.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer), ou php database/migrate.php.
+-- =============================================================================
+ALTER TABLE merchant_applications
+  ADD COLUMN ifu_path VARCHAR(255) NULL AFTER selfie_path,
+  ADD COLUMN rccm_path VARCHAR(255) NULL AFTER ifu_path;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('023_ifu_rccm.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 024_historique_profils.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 024 : historique des modifications de profil et d'étal, pour l'équipe Axi.
+--   Chaque changement de nom, téléphone, présentation, photo de profil, nom d'étal, contacts ou
+--   emplacement est gardé : avant, après, qui (la personne dans l'application ou un agent), quand.
+--   Sert à repérer un vrai nom remplacé par un pseudonyme, ou un étal renommé avec le nom d'un autre.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer), ou php database/migrate.php.
+-- =============================================================================
+CREATE TABLE profile_changes (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id INT UNSIGNED NOT NULL,
+  stall_id INT UNSIGNED NULL,
+  field VARCHAR(40) NOT NULL,
+  old_value VARCHAR(600) NULL,
+  new_value VARCHAR(600) NULL,
+  source ENUM('app','agent') NOT NULL DEFAULT 'app',
+  actor_id INT UNSIGNED NULL,
+  created_at DATETIME NOT NULL,
+  KEY idx_profile_changes_user (user_id, id),
+  KEY idx_profile_changes_recent (field, created_at),
+  CONSTRAINT fk_profile_changes_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('024_historique_profils.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 025_blocages_utilisateurs.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 025 : un client ou un commerçant peut bloquer un autre utilisateur qui le dérange (sans passer par l'équipe Axi).
+--   Tant que le blocage dure, les deux ne se voient plus nulle part : discussion, profil, étal, produits,
+--   recherche, accueil, fichier clients, messages groupés ; aucun message ni commande de l'un à l'autre.
+--   Les commandes déjà passées restent consultables (argent engagé). Débloquer rétablit tout.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer), ou php database/migrate.php.
+-- =============================================================================
+CREATE TABLE user_blocks (
+  blocker_id INT UNSIGNED NOT NULL,
+  blocked_id INT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL,
+  PRIMARY KEY (blocker_id, blocked_id),
+  KEY idx_user_blocks_blocked (blocked_id, blocker_id),
+  CONSTRAINT fk_user_blocks_blocker FOREIGN KEY (blocker_id) REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_user_blocks_blocked FOREIGN KEY (blocked_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('025_blocages_utilisateurs.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 026_demandes_suppression.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 026 : suppression de compte sur demande. La personne donne son mot de passe et la raison ; la demande attend
+--   l'équipe Axi, qui efface définitivement le compte et ses informations, ou annule la demande (personne prévenue).
+--   Après effacement, la ligne ne garde plus aucune donnée personnelle (raison vidée) : seulement qui, quand.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer), ou php database/migrate.php.
+-- =============================================================================
+CREATE TABLE account_deletion_requests (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id INT UNSIGNED NULL,
+  reason VARCHAR(1000) NULL,
+  status ENUM('pending','erased','cancelled','withdrawn') NOT NULL DEFAULT 'pending',
+  agent_note VARCHAR(500) NULL,
+  decided_by INT UNSIGNED NULL,
+  created_at DATETIME NOT NULL,
+  decided_at DATETIME NULL,
+  KEY idx_deletion_status (status, created_at),
+  KEY idx_deletion_user (user_id, status),
+  CONSTRAINT fk_deletion_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+  CONSTRAINT fk_deletion_agent FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('026_demandes_suppression.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
+-- 027_avis_discussion.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 027 : avis dans la discussion (comme WhatsApp) : « … a réglé les messages éphémères sur 48 h ».
+--   kind = 'system' ; body = le nombre d'heures ; jamais compté comme non lu, jamais notifié, jamais effacé
+--   avec les messages éphémères.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer), ou php database/migrate.php.
+-- =============================================================================
+ALTER TABLE messages MODIFY kind ENUM('text','photo','voice','video','system') NOT NULL DEFAULT 'text';
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('027_avis_discussion.sql', UTC_TIMESTAMP());
 
 -- -----------------------------------------------------------------------------
 -- Comptes de test (un par rôle, et un par type de partenaire). Changer les mots de passe en production.

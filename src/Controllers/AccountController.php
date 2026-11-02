@@ -157,10 +157,10 @@ final class AccountController
         Response::ok(['revoked' => true]);
     }
 
-    /** Historique des connexions (30 dernières), réussies et refusées */
+    /** Historique des connexions de la dernière semaine, réussies et refusées (au-delà : effacé par la tâche de nuit) */
     public function loginHistory(Request $req): never
     {
-        $rows = Database::all('SELECT * FROM login_events WHERE user_id = ? ORDER BY id DESC LIMIT 30', [$req->userId()]);
+        $rows = Database::all('SELECT * FROM login_events WHERE user_id = ? AND created_at > ? ORDER BY id DESC LIMIT 20', [$req->userId(), Clock::now(-\Axi\Services\Nightly::LOGIN_HISTORY_DAYS * 86400)]);
         Response::ok(['events' => array_map(static fn (array $e): array => [
             'success' => (bool) $e['success'],
             'label' => $e['success'] ? 'Connexion réussie' : match ($e['reason']) {
@@ -208,20 +208,37 @@ final class AccountController
         Response::ok(['url' => SignedUrl::make('/v1/me/export.json', ['u' => $req->userId()], 600)]);
     }
 
+    /**
+     * Mes données, lues DANS l'application (écran « Mes données ») : le téléphone les affiche, puis peut enregistrer
+     * ou partager le fichier. Le lien signé ci-dessous reste disponible (navigateur d'un ordinateur).
+     */
+    public function data(Request $req): never
+    {
+        Response::ok(self::exportPayload($req->userId()));
+    }
+
+    /** Toutes les données personnelles du compte, telles qu'enregistrées */
+    private static function exportPayload(int $userId): array
+    {
+        return [
+            'exported_at' => gmdate('c'),
+            'account' => Database::one('SELECT first_name, last_name, email, phone, bio, role, lang, avatar_visibility, created_at FROM users WHERE id = ?', [$userId]),
+            'settings' => Database::one('SELECT theme, currency, date_format, notifications, default_address, preferred_operator, preferred_payment_phone FROM user_settings WHERE user_id = ?', [$userId]),
+            'stall' => Database::one('SELECT name, tagline, phone, whatsapp, site_id, aisle_id, row_label, stand, merchant_type, created_at FROM stalls WHERE user_id = ?', [$userId]),
+            'orders' => Database::all('SELECT id, status, total, reception_mode, reception_detail, created_at, paid_at, delivered_at FROM orders WHERE client_id = ? ORDER BY id DESC', [$userId]),
+            'payments' => Database::all('SELECT reference, purpose, provider, amount, status, created_at, paid_at FROM payments WHERE user_id = ? ORDER BY id DESC', [$userId]),
+            'followed_stalls' => Database::all('SELECT s.name, f.created_at FROM stall_follows f JOIN stalls s ON s.id = f.stall_id WHERE f.user_id = ? ORDER BY f.created_at DESC', [$userId]),
+            'favorites' => Database::all('SELECT p.name, f.created_at FROM favorites f JOIN products p ON p.id = f.product_id WHERE f.user_id = ? ORDER BY f.created_at DESC', [$userId]),
+            'consents' => Database::all('SELECT o.name AS partner, c.scope, c.granted_at, c.revoked_at FROM data_sharing_consents c JOIN organizations o ON o.id = c.organization_id WHERE c.merchant_user_id = ? ORDER BY c.id DESC', [$userId]),
+            'blocked_users' => Database::all("SELECT CONCAT(u.first_name, ' ', LEFT(u.last_name, 1), '.') AS name, b.created_at FROM user_blocks b JOIN users u ON u.id = b.blocked_id WHERE b.blocker_id = ? ORDER BY b.created_at DESC", [$userId]),
+            'logins' => Database::all('SELECT success, device, ip, created_at FROM login_events WHERE user_id = ? AND created_at > ? ORDER BY id DESC LIMIT 200', [$userId, Clock::now(-\Axi\Services\Nightly::LOGIN_HISTORY_DAYS * 86400)]),
+        ];
+    }
+
     public function export(Request $req): never
     {
         $userId = (int) SignedUrl::verify('/v1/me/export.json', $req->queryAll())['u'];
-        $data = [
-            'exported_at' => gmdate('c'),
-            'account' => Database::one('SELECT first_name, last_name, email, phone, role, lang, created_at FROM users WHERE id = ?', [$userId]),
-            'settings' => Database::one('SELECT theme, currency, date_format, notifications, default_address, preferred_operator, preferred_payment_phone FROM user_settings WHERE user_id = ?', [$userId]),
-            'orders' => Database::all('SELECT id, status, total, reception_mode, reception_detail, created_at, paid_at, delivered_at FROM orders WHERE client_id = ? ORDER BY id', [$userId]),
-            'payments' => Database::all('SELECT reference, purpose, provider, amount, status, created_at, paid_at FROM payments WHERE user_id = ? ORDER BY id', [$userId]),
-            'followed_stalls' => Database::all('SELECT s.name, f.created_at FROM stall_follows f JOIN stalls s ON s.id = f.stall_id WHERE f.user_id = ?', [$userId]),
-            'favorites' => Database::all('SELECT p.name, f.created_at FROM favorites f JOIN products p ON p.id = f.product_id WHERE f.user_id = ?', [$userId]),
-            'consents' => Database::all('SELECT scope, granted_at, revoked_at FROM data_sharing_consents WHERE merchant_user_id = ?', [$userId]),
-            'logins' => Database::all('SELECT success, device, ip, created_at FROM login_events WHERE user_id = ? ORDER BY id DESC LIMIT 200', [$userId]),
-        ];
+        $data = self::exportPayload($userId);
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="mes-donnees-axi.json"');
         header('Cache-Control: no-store');
@@ -233,32 +250,52 @@ final class AccountController
      * Suppression du compte (le mot de passe est redemandé ; l'application demande deux confirmations).
      * Les données personnelles sont effacées ; les commandes restent, anonymes, pour la comptabilité.
      */
+    /**
+     * Demande de suppression du compte : mot de passe ET raison. Rien n'est effacé tout de suite : la demande attend
+     * l'équipe Axi, qui efface définitivement le compte ou annule la demande ; la personne est prévenue dans les deux cas.
+     * Elle peut retirer sa demande tant qu'elle attend (DELETE /v1/me/deletion-request).
+     */
     public function deleteAccount(Request $req): never
     {
-        $in = Validator::validate($req->all(), ['password' => 'required|string|raw|max:200'], ['password' => 'Mot de passe']);
+        $in = Validator::validate($req->all(), ['password' => 'required|string|raw|max:200', 'reason' => 'required|string|max:1000'], ['password' => 'Mot de passe', 'reason' => 'Raison']);
         if (!password_verify($in['password'], $req->user['password_hash'])) {
             throw new HttpException(422, 'VALIDATION_ERROR', 'Mot de passe incorrect.', ['fields' => ['password' => 'Mot de passe incorrect.']]);
         }
-        $userId = $req->userId();
-        $open = Database::value("SELECT COUNT(*) FROM orders WHERE client_id = ? AND status IN ('paid','preparing','on_the_way','disputed')", [$userId]);
-        $merchantOpen = Database::value("SELECT COUNT(*) FROM order_stalls os JOIN stalls s ON s.id = os.stall_id WHERE s.user_id = ? AND os.escrow_state IN ('held','disputed')", [$userId]);
-        if ((int) $open > 0 || (int) $merchantOpen > 0) {
-            throw new HttpException(409, 'OPEN_ORDERS', 'Vous avez des commandes en cours. Attendez leur livraison avant de supprimer votre compte.');
+        $reason = trim((string) $in['reason']);
+        if (mb_strlen($reason) < 10) {
+            Validator::fail(['reason' => 'Expliquez en quelques mots pourquoi vous voulez supprimer votre compte (10 caractères au moins).'], ['reason' => 'Raison']);
         }
-        Database::transaction(static function () use ($userId): void {
-            Database::run(
-                'UPDATE users SET first_name = \'Compte\', last_name = \'supprimé\', name = \'Compte supprimé\', email = ?, phone = NULL, password_hash = ?, status = \'deleted\', deleted_at = ? WHERE id = ?',
-                ['supprime-' . $userId . '@deleted.invalid', password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT), Clock::now(), $userId],
-            );
-            foreach (['user_settings', 'favorites', 'product_views', 'stall_follows', 'notifications', 'push_tokens', 'sales_hidden'] as $table) {
-                Database::run("DELETE FROM $table WHERE user_id = ?", [$userId]);
-            }
-            Database::run('UPDATE data_sharing_consents SET revoked_at = ? WHERE merchant_user_id = ? AND revoked_at IS NULL', [Clock::now(), $userId]);
-            Database::run('UPDATE stalls SET status = \'closed\', phone = NULL, whatsapp = NULL WHERE user_id = ?', [$userId]);
-            Database::run('UPDATE merchant_clients SET user_id = NULL WHERE user_id = ?', [$userId]);
-        });
-        Auth::revokeAll($userId);
-        Response::ok(['deleted' => true]);
+        $userId = $req->userId();
+        if (Database::value("SELECT 1 FROM account_deletion_requests WHERE user_id = ? AND status = 'pending'", [$userId]) !== null) {
+            throw new HttpException(409, 'DELETION_PENDING', 'Votre demande de suppression est déjà en cours d\'examen par l\'équipe Axi.');
+        }
+        Database::insert('INSERT INTO account_deletion_requests (user_id, reason, created_at) VALUES (?, ?, ?)', [$userId, mb_substr($reason, 0, 1000), Clock::now()]);
+        $message = 'Votre demande de suppression a été envoyée à l\'équipe Axi. Elle sera traitée sous 7 jours au plus et vous serez prévenu par email. D\'ici là, votre compte reste utilisable et vous pouvez annuler votre demande.';
+        \Axi\Services\Notifier::send($userId, 'account', 'Demande de suppression reçue', $message, [], [], true);
+        \Axi\Services\Payment\Escrow::alertAgents('Demande de suppression de compte', $req->user['name'] . ' (' . $req->user['email'] . ') demande la suppression de son compte. Raison : ' . mb_substr($reason, 0, 200) . ' — À traiter dans Suppressions.');
+        Response::ok(['status' => 'pending', 'message' => $message, 'request' => self::deletionRequestOf($userId)], 201);
+    }
+
+    /** Ma demande de suppression en attente (ou null) */
+    public function deletionRequest(Request $req): never
+    {
+        Response::ok(['request' => self::deletionRequestOf($req->userId())]);
+    }
+
+    /** Je retire ma demande de suppression tant qu'elle attend */
+    public function cancelDeletionRequest(Request $req): never
+    {
+        $n = Database::run("UPDATE account_deletion_requests SET status = 'withdrawn', decided_at = ? WHERE user_id = ? AND status = 'pending'", [Clock::now(), $req->userId()])->rowCount();
+        if ($n === 0) {
+            throw new HttpException(404, 'NOT_FOUND', 'Aucune demande de suppression en attente.');
+        }
+        Response::ok(['request' => null, 'message' => 'Demande de suppression annulée : votre compte est conservé.']);
+    }
+
+    private static function deletionRequestOf(int $userId): ?array
+    {
+        $r = Database::one("SELECT * FROM account_deletion_requests WHERE user_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1", [$userId]);
+        return $r === null ? null : ['id' => Ids::encode('sup', $r['id']), 'reason' => $r['reason'], 'created_at' => Clock::iso($r['created_at'])];
     }
 
     /** Invitations en attente : des commerçants veulent m'ajouter à leurs clients (j'accepte ou je refuse) */
@@ -339,8 +376,8 @@ final class AccountController
         $rows = Database::all(
             'SELECT p.*, s.name AS stall_name, s.verified_at AS stall_verified_at FROM favorites f
              JOIN products p ON p.id = f.product_id JOIN stalls s ON s.id = p.stall_id
-             WHERE f.user_id = ? AND ' . Stalls::VISIBLE . ' AND s.status = \'active\' ORDER BY f.created_at DESC LIMIT 100',
-            [$req->userId()],
+             WHERE f.user_id = ? AND ' . Stalls::VISIBLE . ' AND s.status = \'active\' AND ' . \Axi\Support\Blocks::excludeSql('s.user_id')[0] . ' ORDER BY f.created_at DESC LIMIT 100',
+            [$req->userId(), ...\Axi\Support\Blocks::excludeSql('s.user_id')[1]],
         );
         Response::ok(['products' => $this->withStall($rows)]);
     }
@@ -364,8 +401,8 @@ final class AccountController
         $rows = Database::all(
             'SELECT p.*, s.name AS stall_name, s.verified_at AS stall_verified_at FROM product_views v
              JOIN products p ON p.id = v.product_id JOIN stalls s ON s.id = p.stall_id
-             WHERE v.user_id = ? AND ' . Stalls::VISIBLE . ' AND s.status = \'active\' ORDER BY v.viewed_at DESC LIMIT 30',
-            [$req->userId()],
+             WHERE v.user_id = ? AND ' . Stalls::VISIBLE . ' AND s.status = \'active\' AND ' . \Axi\Support\Blocks::excludeSql('s.user_id')[0] . ' ORDER BY v.viewed_at DESC LIMIT 30',
+            [$req->userId(), ...\Axi\Support\Blocks::excludeSql('s.user_id')[1]],
         );
         Response::ok(['products' => $this->withStall($rows)]);
     }
@@ -382,7 +419,8 @@ final class AccountController
     private function activeProduct(Request $req): int
     {
         $id = $req->id('prd', 'PRODUCT_NOT_FOUND', 'Produit introuvable.');
-        if (Database::value('SELECT id FROM products WHERE id = ? AND status = \'active\'', [$id]) === null) {
+        [$notBlocked, $blockedIds] = \Axi\Support\Blocks::excludeSql('s.user_id');
+        if (Database::value('SELECT p.id FROM products p JOIN stalls s ON s.id = p.stall_id WHERE p.id = ? AND p.status = \'active\' AND ' . $notBlocked, [$id, ...$blockedIds]) === null) {
             throw new HttpException(404, 'PRODUCT_NOT_FOUND', 'Ce produit n\'existe pas ou a été supprimé.');
         }
         return $id;
@@ -426,12 +464,14 @@ final class AccountController
         $photo = $req->file('photo') ?? \Axi\Core\Validator::fail(['photo' => 'Choisissez une photo.'], ['photo' => 'Photo de profil']);
         $saved = \Axi\Services\Uploads::photo($photo);
         Database::run('UPDATE users SET avatar_path = ? WHERE id = ?', [$saved['path'], $req->userId()]);
+        \Axi\Services\ProfileChanges::record($req->userId(), null, ['avatar' => $req->user['avatar_path']], ['avatar' => $saved['path']]);
         Response::ok(\Axi\Support\Users::presentById($req->userId()));
     }
 
     public function deleteAvatar(Request $req): never
     {
         Database::run('UPDATE users SET avatar_path = NULL WHERE id = ?', [$req->userId()]);
+        \Axi\Services\ProfileChanges::record($req->userId(), null, ['avatar' => $req->user['avatar_path']], ['avatar' => null]);
         Response::ok(\Axi\Support\Users::presentById($req->userId()));
     }
 }

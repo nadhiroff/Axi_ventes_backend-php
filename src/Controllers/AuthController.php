@@ -265,6 +265,8 @@ final class AuthController
             $first = $in['first_name'] ?? $req->user['first_name'];
             $last = $in['last_name'] ?? $req->user['last_name'];
             Database::updateById('users', $req->userId(), $in + ['name' => trim($first . ' ' . $last)]);
+            // Gardé pour les agents Axi : un vrai nom remplacé par un pseudonyme se voit dans la fiche
+            \Axi\Services\ProfileChanges::record($req->userId(), null, $req->user, array_intersect_key($in, array_flip(['first_name', 'last_name', 'phone', 'bio'])));
         }
         Response::ok(Users::presentById($req->userId()));
     }

@@ -43,7 +43,12 @@ final class MessagesController
             [$me, $stallId ?? 0],
         );
         $out = [];
+        $hidden = array_flip(\Axi\Support\Blocks::hiddenFor($me));
         foreach ($rows as $c) {
+            // Personne bloquée (ou qui m'a bloqué) : sa discussion disparaît de ma liste
+            if (isset($hidden[(int) $c['client_id'] === $me ? (int) $c['merchant_id'] : (int) $c['client_id']])) {
+                continue;
+            }
             $cleared = (int) ((int) $c['client_id'] === $me ? $c['client_cleared_msg_id'] : $c['merchant_cleared_msg_id']);
             $last = Database::one('SELECT m.* FROM messages m WHERE m.conversation_id = ? AND m.id > ? AND ' . Messaging::VISIBLE . self::NOT_HIDDEN . ' ORDER BY m.id DESC LIMIT 1', [$c['id'], $cleared, $me]);
             if ($last === null) {
@@ -77,6 +82,9 @@ final class MessagesController
         }
         if ($userId === null) {
             throw new HttpException(422, 'CLIENT_WITHOUT_ACCOUNT', 'Ce client n\'a pas de compte Axi : écrivez-lui par WhatsApp ou appelez-le.');
+        }
+        if (\Axi\Support\Blocks::between($req->userId(), (int) $userId)) {
+            throw new HttpException(404, 'CLIENT_NOT_FOUND', 'Client introuvable.');
         }
         // Ajouté à la main : il doit d'abord accepter (ou suivre l'étal) avant toute discussion
         if (!Messaging::linked((int) $userId, $stallId)) {
@@ -127,7 +135,7 @@ final class MessagesController
         $replyTo = null;
         if (isset($in['reply_to']) && $in['reply_to'] !== '') {
             $replyTo = Ids::tryDecode('msg', $in['reply_to']);
-            if ($replyTo === null || Database::value('SELECT id FROM messages WHERE id = ? AND conversation_id = ?', [$replyTo, $c['id']]) === null) {
+            if ($replyTo === null || Database::value('SELECT id FROM messages WHERE id = ? AND conversation_id = ? AND kind <> \'system\'', [$replyTo, $c['id']]) === null) {
                 throw new HttpException(422, 'VALIDATION_ERROR', 'Le message auquel vous répondez n\'existe plus.');
             }
         }
@@ -150,8 +158,13 @@ final class MessagesController
                 'INSERT INTO messages (conversation_id, sender_id, kind, body, file_path, file_width, file_height, reply_to_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 [$c['id'], $me, $kind, $body === '' ? null : $body, $path, $width, $height, $replyTo, $now, Messaging::expiresAt($c)],
             );
-            $mine = (int) $c['client_id'] === $me ? 'client_read_at' : 'merchant_read_at';
-            Database::run("UPDATE conversations SET last_message_at = ?, $mine = ? WHERE id = ?", [$now, $now, $c['id']]);
+            // Répondre vaut lecture (comme WhatsApp) : date ET repère de lecture, pour que les compteurs de non lus
+            // (liste des discussions, « Mes clients », pastilles) tombent à zéro pour cette discussion
+            $side = (int) $c['client_id'] === $me ? 'client' : 'merchant';
+            Database::run(
+                "UPDATE conversations SET last_message_at = ?, {$side}_read_at = ?, {$side}_read_msg_id = GREATEST({$side}_read_msg_id, ?) WHERE id = ?",
+                [$now, $now, $id, $c['id']],
+            );
             return $id;
         });
         $this->pushMessage($c, $me, $kind, $body);
@@ -218,7 +231,17 @@ final class MessagesController
         if (Messaging::RETENTION[$hours]) {
             \Axi\Support\Subscription::require((int) $c['stall_id'], 'Garder les messages ' . Messaging::label($hours));
         }
+        $before = Messaging::effectiveHours($c);
         Messaging::setRetention((int) $c['id'], $hours);
+        // Avis dans la discussion, comme WhatsApp : chacun voit que la durée des messages a changé (jamais effacé)
+        if ($before !== $hours) {
+            $now = Clock::now();
+            Database::run(
+                'INSERT INTO messages (conversation_id, sender_id, kind, body, created_at, expires_at) VALUES (?, ?, \'system\', ?, ?, NULL)',
+                [$c['id'], $req->userId(), (string) $hours, $now],
+            );
+            Database::run('UPDATE conversations SET last_message_at = ? WHERE id = ?', [$now, $c['id']]);
+        }
         $row = Database::one(
             'SELECT c.*, s.name AS stall_name, s.photo_path, s.photo_width, s.photo_height, s.user_id AS merchant_id,
                     u.id AS client_user_id, u.name AS client_name, u.avatar_path, u.avatar_visibility
@@ -258,7 +281,7 @@ final class MessagesController
     {
         $c = $this->participant($req);
         $msgId = Ids::decode('msg', $req->params['message'] ?? null, 'MESSAGE_NOT_FOUND', 'Message introuvable.');
-        $m = Database::one('SELECT m.* FROM messages m WHERE m.id = ? AND m.conversation_id = ? AND ' . Messaging::VISIBLE, [$msgId, $c['id']]);
+        $m = Database::one('SELECT m.* FROM messages m WHERE m.id = ? AND m.conversation_id = ? AND m.kind <> \'system\' AND ' . Messaging::VISIBLE, [$msgId, $c['id']]);
         if ($m === null || $m['deleted_at'] !== null) {
             throw new HttpException(404, 'MESSAGE_NOT_FOUND', 'Message introuvable.');
         }
@@ -288,13 +311,15 @@ final class MessagesController
         if ($stallId > 0) {
             Database::run("UPDATE conversations c SET c.merchant_delivered_at = ?, c.merchant_delivered_msg_id = $max WHERE c.stall_id = ? AND c.last_message_at IS NOT NULL AND (c.merchant_delivered_at IS NULL OR c.merchant_delivered_at <= c.last_message_at)", [$now, $stallId]);
         }
-        // Comptés à part : les discussions où je suis client et celles de mon commerce ne se mélangent pas
+        // Comptés à part : les discussions où je suis client et celles de mon commerce ne se mélangent pas.
+        // Messages d'une personne bloquée (dans un sens ou dans l'autre) : jamais comptés
+        [$notBlocked, $blockedIds] = \Axi\Support\Blocks::excludeSql('m.sender_id', $me);
         $unread = Database::one(
             'SELECT COALESCE(SUM(c.client_id = ? AND m.id > c.client_cleared_msg_id AND (c.client_read_at IS NULL OR m.created_at > c.client_read_at)), 0) AS client,
                     COALESCE(SUM(c.stall_id = ? AND m.id > c.merchant_cleared_msg_id AND (c.merchant_read_at IS NULL OR m.created_at > c.merchant_read_at)), 0) AS merchant
              FROM messages m JOIN conversations c ON c.id = m.conversation_id
-             WHERE ' . Messaging::VISIBLE . self::NOT_HIDDEN . ' AND m.sender_id <> ?',
-            [$me, $stallId, $me, $me],
+             WHERE ' . Messaging::VISIBLE . self::NOT_HIDDEN . ' AND m.sender_id <> ? AND m.kind <> \'system\' AND ' . $notBlocked,
+            [$me, $stallId, $me, $me, ...$blockedIds],
         );
         $user = Database::one('SELECT role, merchant_welcome_pending FROM users WHERE id = ?', [$me]);
         Response::ok([
@@ -328,6 +353,12 @@ final class MessagesController
         if ($c === null || ((int) $c['client_id'] !== $req->userId() && (int) $c['merchant_id'] !== $req->userId())) {
             throw new HttpException(404, 'CONVERSATION_NOT_FOUND', 'Conversation introuvable.');
         }
+        // Blocage entre les deux (dans un sens ou dans l'autre) : la discussion n'existe plus pour personne ;
+        // elle revient telle quelle au déblocage
+        $other = (int) $c['client_id'] === $req->userId() ? (int) $c['merchant_id'] : (int) $c['client_id'];
+        if (\Axi\Support\Blocks::between($req->userId(), $other)) {
+            throw new HttpException(404, 'CONVERSATION_NOT_FOUND', 'Cette discussion n\'est plus disponible.');
+        }
         return $c;
     }
 
@@ -360,7 +391,7 @@ final class MessagesController
         $readAt = $asClient ? $c['client_read_at'] : $c['merchant_read_at'];
         $cleared = (int) ($asClient ? ($c['client_cleared_msg_id'] ?? 0) : ($c['merchant_cleared_msg_id'] ?? 0));
         $unread = (int) Database::value(
-            'SELECT COUNT(*) FROM messages m WHERE m.conversation_id = ? AND m.id > ? AND m.sender_id <> ? AND ' . Messaging::VISIBLE . self::NOT_HIDDEN . ($readAt !== null ? ' AND m.created_at > ?' : ''),
+            'SELECT COUNT(*) FROM messages m WHERE m.conversation_id = ? AND m.id > ? AND m.sender_id <> ? AND m.kind <> \'system\' AND ' . Messaging::VISIBLE . self::NOT_HIDDEN . ($readAt !== null ? ' AND m.created_at > ?' : ''),
             $readAt !== null ? [$c['id'], $cleared, $me, $me, $readAt] : [$c['id'], $cleared, $me, $me],
         );
         $stallImage = Stalls::image($c['photo_path'], $c['photo_width'] === null ? null : (int) $c['photo_width'], $c['photo_height'] === null ? null : (int) $c['photo_height']);
@@ -402,10 +433,11 @@ final class MessagesController
             'unread_count' => $unread,
             'last_message' => $last === null ? null : [
                 'kind' => $last['kind'],
-                'preview' => $last['deleted_at'] !== null ? '🚫 Message supprimé' : match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', 'video' => '🎥 Vidéo', default => mb_substr((string) $last['body'], 0, 80) },
-                'mine' => (int) $last['sender_id'] === $me,
+                'preview' => $last['deleted_at'] !== null ? '🚫 Message supprimé' : match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', 'video' => '🎥 Vidéo', 'system' => '🕒 ' . self::systemText($last, $me, $c['stall_name'] ?? null), default => mb_substr((string) $last['body'], 0, 80) },
+                // Un avis n'a pas de coches ni d'auteur affiché (« Vous : »)
+                'mine' => $last['kind'] !== 'system' && (int) $last['sender_id'] === $me,
                 // Coches visibles dans la liste : ✓ envoyé, ✓✓ reçu, ✓✓ bleu vu (mes messages seulement)
-                'status' => (int) $last['sender_id'] !== $me ? null : match (true) {
+                'status' => (int) $last['sender_id'] !== $me || $last['kind'] === 'system' ? null : match (true) {
                     (int) $c[($asClient ? 'merchant' : 'client') . '_read_msg_id'] >= (int) $last['id'] => 'read',
                     (int) $c[($asClient ? 'merchant' : 'client') . '_delivered_msg_id'] >= (int) $last['id'] => 'delivered',
                     default => 'sent',
@@ -425,7 +457,7 @@ final class MessagesController
         if ($id === null) {
             return null;
         }
-        $r = Database::one('SELECT m.* FROM messages m WHERE m.id = ? AND ' . Messaging::VISIBLE, [$id]);
+        $r = Database::one('SELECT m.* FROM messages m WHERE m.id = ? AND m.kind <> \'system\' AND ' . Messaging::VISIBLE, [$id]);
         if ($r === null) {
             return ['id' => Ids::encode('msg', $id), 'mine' => false, 'kind' => 'text', 'preview' => 'Message effacé'];
         }
@@ -437,9 +469,28 @@ final class MessagesController
         ];
     }
 
+    /**
+     * Texte d'un avis de la discussion (kind « system »), vu par $me : « Vous avez réglé… » ou « {étal} a réglé… ».
+     * body = nombre d'heures choisi.
+     */
+    private static function systemText(array $m, int $me, ?string $stallName = null): string
+    {
+        $label = Messaging::label((int) $m['body']);
+        $who = (int) $m['sender_id'] === $me ? 'Vous avez' : (($stallName ?? 'Le commerçant') . ' a');
+        return "$who réglé les messages éphémères : ils disparaissent $label après leur envoi.";
+    }
+
     private function message(array $m, int $me, array $c): array
     {
         $mine = (int) $m['sender_id'] === $me;
+        if ($m['kind'] === 'system') {
+            $stallName = (string) Database::value('SELECT name FROM stalls WHERE id = ?', [$c['stall_id']]);
+            return [
+                'id' => Ids::encode('msg', $m['id']), 'mine' => $mine, 'status' => null, 'edited' => false, 'reply' => null, 'deleted' => false,
+                'kind' => 'system', 'body' => self::systemText($m, $me, $stallName), 'image' => null, 'audio_url' => null, 'video_url' => null,
+                'created_at' => Clock::iso($m['created_at']), 'expires_at' => null,
+            ];
+        }
         $otherSide = (int) $c['client_id'] === $me ? 'merchant' : 'client';
         $readId = (int) $c[$otherSide . '_read_msg_id'];
         $deliveredId = (int) $c[$otherSide . '_delivered_msg_id'];

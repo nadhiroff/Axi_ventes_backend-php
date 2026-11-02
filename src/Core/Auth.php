@@ -105,6 +105,8 @@ final class Auth
         Database::run('UPDATE auth_tokens SET last_used_at = ?, expires_at = ? WHERE id = ?', [Clock::now(), Clock::now(self::ttl()), $row['token_id']]);
         $request->tokenId = (int) $row['token_id'];
         $request->user = $row;
+        // Comptes bloqués entre utilisateurs : écartés automatiquement des listes d'étals et de produits
+        \Axi\Support\Blocks::setViewer((int) $row['id']);
     }
 
     private static function ttl(): int
