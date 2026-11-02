@@ -120,6 +120,28 @@ check('avant le blocage : la cliente (abonnée) est dans « Mes clients »', in_
 check('avant le blocage : discussion visible des deux côtés', in_array($conv, $ids(call('GET', '/v1/conversations', null, $cToken)['body']['data']['conversations'] ?? []), true)
     && in_array($conv, $ids(call('GET', '/v1/conversations', null, $mToken)['body']['data']['conversations'] ?? []), true), "conversation « $conv »");
 
+section('0. Liste « Mes clients » : dernier message et coches, sans ouvrir la discussion');
+$lastOf = static function () use ($mToken, $cId): ?array {
+    foreach (call('GET', '/v1/merchant/clients', null, $mToken)['body']['data']['clients'] ?? [] as $c) {
+        if (($c['user_id'] ?? '') === "usr_$cId") {
+            return $c['last_message'];
+        }
+    }
+    return null;
+};
+call('POST', "/v1/conversations/$conv/messages", ['body' => 'Oui, il en reste trois.'], $mToken);
+$last = $lastOf();
+check('le message du commerçant apparaît tout de suite dans la liste, avec ✓ (envoyé)', ($last['preview'] ?? '') === 'Oui, il en reste trois.' && ($last['mine'] ?? false) === true && in_array($last['status'] ?? '', ['sent', 'delivered'], true), json_encode($last));
+call('GET', "/v1/conversations/$conv/messages", null, $cToken);
+check('la cliente l\'a lu : ✓✓ bleu (vu) dans la liste', ($lastOf()['status'] ?? '') === 'read', json_encode($lastOf()));
+$clientSide = null;
+foreach (call('GET', '/v1/conversations', null, $mToken)['body']['data']['conversations'] ?? [] as $c) {
+    if ($c['id'] === $conv) {
+        $clientSide = $c['last_message'];
+    }
+}
+check('liste des discussions : même dernier message et même état « vu »', ($clientSide['preview'] ?? '') === 'Oui, il en reste trois.' && ($clientSide['status'] ?? '') === 'read', json_encode($clientSide));
+
 section('1. La cliente bloque le commerçant');
 $r = call('POST', "/v1/users/$merchantUserId/block", [], $cToken);
 check('blocage accepté', $r['status'] === 200 && ($r['body']['data']['blocked'] ?? false) === true, $r['raw']);
