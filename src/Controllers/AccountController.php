@@ -208,20 +208,37 @@ final class AccountController
         Response::ok(['url' => SignedUrl::make('/v1/me/export.json', ['u' => $req->userId()], 600)]);
     }
 
+    /**
+     * Mes données, lues DANS l'application (écran « Mes données ») : le téléphone les affiche, puis peut enregistrer
+     * ou partager le fichier. Le lien signé ci-dessous reste disponible (navigateur d'un ordinateur).
+     */
+    public function data(Request $req): never
+    {
+        Response::ok(self::exportPayload($req->userId()));
+    }
+
+    /** Toutes les données personnelles du compte, telles qu'enregistrées */
+    private static function exportPayload(int $userId): array
+    {
+        return [
+            'exported_at' => gmdate('c'),
+            'account' => Database::one('SELECT first_name, last_name, email, phone, bio, role, lang, avatar_visibility, created_at FROM users WHERE id = ?', [$userId]),
+            'settings' => Database::one('SELECT theme, currency, date_format, notifications, default_address, preferred_operator, preferred_payment_phone FROM user_settings WHERE user_id = ?', [$userId]),
+            'stall' => Database::one('SELECT name, tagline, phone, whatsapp, site_id, aisle_id, row_label, stand, merchant_type, created_at FROM stalls WHERE user_id = ?', [$userId]),
+            'orders' => Database::all('SELECT id, status, total, reception_mode, reception_detail, created_at, paid_at, delivered_at FROM orders WHERE client_id = ? ORDER BY id DESC', [$userId]),
+            'payments' => Database::all('SELECT reference, purpose, provider, amount, status, created_at, paid_at FROM payments WHERE user_id = ? ORDER BY id DESC', [$userId]),
+            'followed_stalls' => Database::all('SELECT s.name, f.created_at FROM stall_follows f JOIN stalls s ON s.id = f.stall_id WHERE f.user_id = ? ORDER BY f.created_at DESC', [$userId]),
+            'favorites' => Database::all('SELECT p.name, f.created_at FROM favorites f JOIN products p ON p.id = f.product_id WHERE f.user_id = ? ORDER BY f.created_at DESC', [$userId]),
+            'consents' => Database::all('SELECT o.name AS partner, c.scope, c.granted_at, c.revoked_at FROM data_sharing_consents c JOIN organizations o ON o.id = c.organization_id WHERE c.merchant_user_id = ? ORDER BY c.id DESC', [$userId]),
+            'blocked_users' => Database::all("SELECT CONCAT(u.first_name, ' ', LEFT(u.last_name, 1), '.') AS name, b.created_at FROM user_blocks b JOIN users u ON u.id = b.blocked_id WHERE b.blocker_id = ? ORDER BY b.created_at DESC", [$userId]),
+            'logins' => Database::all('SELECT success, device, ip, created_at FROM login_events WHERE user_id = ? ORDER BY id DESC LIMIT 200', [$userId]),
+        ];
+    }
+
     public function export(Request $req): never
     {
         $userId = (int) SignedUrl::verify('/v1/me/export.json', $req->queryAll())['u'];
-        $data = [
-            'exported_at' => gmdate('c'),
-            'account' => Database::one('SELECT first_name, last_name, email, phone, role, lang, created_at FROM users WHERE id = ?', [$userId]),
-            'settings' => Database::one('SELECT theme, currency, date_format, notifications, default_address, preferred_operator, preferred_payment_phone FROM user_settings WHERE user_id = ?', [$userId]),
-            'orders' => Database::all('SELECT id, status, total, reception_mode, reception_detail, created_at, paid_at, delivered_at FROM orders WHERE client_id = ? ORDER BY id', [$userId]),
-            'payments' => Database::all('SELECT reference, purpose, provider, amount, status, created_at, paid_at FROM payments WHERE user_id = ? ORDER BY id', [$userId]),
-            'followed_stalls' => Database::all('SELECT s.name, f.created_at FROM stall_follows f JOIN stalls s ON s.id = f.stall_id WHERE f.user_id = ?', [$userId]),
-            'favorites' => Database::all('SELECT p.name, f.created_at FROM favorites f JOIN products p ON p.id = f.product_id WHERE f.user_id = ?', [$userId]),
-            'consents' => Database::all('SELECT scope, granted_at, revoked_at FROM data_sharing_consents WHERE merchant_user_id = ?', [$userId]),
-            'logins' => Database::all('SELECT success, device, ip, created_at FROM login_events WHERE user_id = ? ORDER BY id DESC LIMIT 200', [$userId]),
-        ];
+        $data = self::exportPayload($userId);
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="mes-donnees-axi.json"');
         header('Cache-Control: no-store');

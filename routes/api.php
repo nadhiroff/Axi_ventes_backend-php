@@ -56,6 +56,8 @@ return static function (Router $r): void {
     $r->get('/v1/me/login-history', [AccountController::class, 'loginHistory'], $user);
     $r->get('/v1/me/consents', [AccountController::class, 'consents'], $user);
     $r->delete('/v1/me/consents/{id}', [AccountController::class, 'revokeConsent'], $user);
+    // Mes données : affichées dans l'application, puis enregistrées ou partagées en fichier
+    $r->get('/v1/me/data', [AccountController::class, 'data'], $user);
     $r->post('/v1/me/export', [AccountController::class, 'exportLink'], $user);
     $r->get('/v1/me/export.json', [AccountController::class, 'export']);
     $r->post('/v1/me/delete', [AccountController::class, 'deleteAccount'], $user);
