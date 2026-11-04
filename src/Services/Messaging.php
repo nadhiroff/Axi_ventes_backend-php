@@ -45,17 +45,14 @@ final class Messaging
         return $hours < 72 ? "$hours h" : intdiv($hours, 24) . ' jours';
     }
 
-    /** Nouvelle durée : les messages encore visibles suivent la nouvelle règle (comptée depuis leur envoi) */
+    /**
+     * Nouvelle durée : elle ne concerne que les NOUVEAUX messages (comme WhatsApp).
+     * Les messages déjà envoyés gardent leur date d'effacement : sinon, en passant à 24 h, tous les messages
+     * de plus de 24 h expiraient d'un coup et disparaissaient de la discussion.
+     */
     public static function setRetention(int $conversationId, int $hours): void
     {
-        Database::transaction(static function () use ($conversationId, $hours): void {
-            Database::run('UPDATE conversations SET retention_hours = ? WHERE id = ?', [$hours, $conversationId]);
-            Database::run(
-                'UPDATE messages SET expires_at = DATE_ADD(created_at, INTERVAL ? HOUR)
-                 WHERE conversation_id = ? AND kind <> \'system\' AND (expires_at IS NULL OR expires_at > UTC_TIMESTAMP())',
-                [$hours, $conversationId],
-            );
-        });
+        Database::run('UPDATE conversations SET retention_hours = ? WHERE id = ?', [$hours, $conversationId]);
     }
 
     /** Le client a accepté d'être dans le fichier du commerçant (ou y est entré en suivant l'étal ou en commandant) */
