@@ -263,13 +263,37 @@ final class ClientsController
     {
         $stall = Merchant::stall($req);
         Subscription::require((int) $stall['id'], 'Le message groupé');
-        $in = Validator::validate($req->all(), [
-            'segment' => 'required|in:all,resellers,loyal,to_follow_up',
+        $body = $req->all();
+        $in = Validator::validate($body, [
+            'segment' => 'in:all,followers,resellers,loyal,to_follow_up',
             'channel' => 'in:axi,whatsapp',
             'text' => 'string|max:400',
-        ], self::LABELS);
-        $text = $in['text'] ?? 'Nouvel arrivage chez ' . $stall['name'] . ' (' . Stalls::location($stall)['label'] . '). Commandez sur Axi.';
-        Response::ok(Broadcaster::send($stall, 'segment', $in['segment'], 'Nouvel arrivage chez ' . $stall['name'], $text, $this->clients((int) $stall['id'], $in['segment'])));
+        ], self::LABELS + ['channel' => 'Envoyer par', 'text' => 'Message']);
+        $ids = $body['client_ids'] ?? null;
+        if (!isset($in['segment']) && !is_array($ids)) {
+            Validator::fail(['segment' => 'Choisissez les clients.'], self::LABELS);
+        }
+        // Ancienne application (sans « channel ») : notification et email comme avant
+        if (!isset($in['channel'])) {
+            $text = $in['text'] ?? 'Nouvel arrivage chez ' . $stall['name'] . ' (' . Stalls::location($stall)['label'] . '). Commandez sur Axi.';
+            Response::ok(Broadcaster::send($stall, 'segment', $in['segment'] ?? 'all', 'Nouvel arrivage chez ' . $stall['name'], $text, $this->clients((int) $stall['id'], $in['segment'] ?? 'all')));
+        }
+        $text = trim((string) ($in['text'] ?? ''));
+        if (mb_strlen($text) < 3) {
+            Validator::fail(['text' => 'Écrivez votre message.'], ['text' => 'Message']);
+        }
+        if (is_array($ids)) {
+            // Clients cochés : seulement ceux de MON fichier, jamais un client bloqué
+            $decoded = array_values(array_unique(array_filter(array_map(static fn ($v): ?int => is_string($v) ? Ids::tryDecode('cli', $v) : null, array_slice($ids, 0, 500)))));
+            if ($decoded === []) {
+                Validator::fail(['client_ids' => 'Choisissez au moins un client.'], ['client_ids' => 'Clients']);
+            }
+            [$where, $params] = $this->segmentSql('all');
+            $clients = Database::all('SELECT * FROM merchant_clients WHERE stall_id = ? AND id IN (' . Database::in($decoded) . ") AND $where", [$stall['id'], ...$decoded, ...$params]);
+        } else {
+            $clients = $this->clients((int) $stall['id'], $in['segment']);
+        }
+        Response::ok(Broadcaster::announce($stall, $req->userId(), $in['channel'], is_array($ids) ? null : $in['segment'], $text, $clients));
     }
 
     /** « Envoyer ma nouvelle adresse » à tout le fichier clients */
@@ -505,7 +529,7 @@ final class ClientsController
             // Compte bloqué par Axi : pas de profil ni de discussion ; il revient seul au déblocage
             'unavailable' => $user !== null && $user['status'] !== 'active',
             'last_message' => $last === null ? null : [
-                'preview' => $last['deleted_at'] !== null ? '🚫 Message supprimé' : match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', 'video' => '🎥 Vidéo', 'system' => '🕒 Messages éphémères : ' . \Axi\Services\Messaging::label((int) $last['body']), default => mb_substr((string) $last['body'], 0, 80) },
+                'preview' => $last['deleted_at'] !== null ? '🚫 Message supprimé' : match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', 'video' => '🎥 Vidéo', 'system' => '🕒 Messages éphémères : ' . \Axi\Services\Messaging::label((int) $last['body']), default => ((int) ($last['is_announcement'] ?? 0) === 1 ? '📢 ' : '') . mb_substr((string) $last['body'], 0, 80) },
                 'mine' => $last['kind'] !== 'system' && (int) $last['sender_id'] !== (int) $c['user_id'],
                 // Coches du dernier message envoyé par le commerçant : ✓ envoyé, ✓✓ reçu, ✓✓ bleu vu par le client
                 'status' => (int) $last['sender_id'] === (int) $c['user_id'] || $last['kind'] === 'system' ? null : match (true) {
@@ -530,7 +554,7 @@ final class ClientsController
     private function lastMessages(int $stallId): array
     {
         $rows = Database::all(
-            'SELECT c.client_id, c.client_read_msg_id, c.client_delivered_msg_id, m.id, m.kind, m.body, m.sender_id, m.created_at, m.deleted_at,
+            'SELECT c.client_id, c.client_read_msg_id, c.client_delivered_msg_id, m.id, m.kind, m.is_announcement, m.body, m.sender_id, m.created_at, m.deleted_at,
                     (SELECT COUNT(*) FROM messages u WHERE u.conversation_id = c.id AND u.sender_id = c.client_id AND u.deleted_at IS NULL
                        AND u.id > GREATEST(COALESCE(c.merchant_read_msg_id, 0), COALESCE(c.merchant_cleared_msg_id, 0))
                        AND (u.expires_at IS NULL OR u.expires_at > UTC_TIMESTAMP())) AS unread

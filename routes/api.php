@@ -10,6 +10,7 @@ use Axi\Controllers\MediaController;
 use Axi\Controllers\MessagesController;
 use Axi\Controllers\Merchant\ClientsController;
 use Axi\Controllers\Merchant\MoneyController;
+use Axi\Controllers\Merchant\OrdersController;
 use Axi\Controllers\Merchant\StallController;
 use Axi\Controllers\Merchant\TodayController;
 use Axi\Controllers\OrderController;
@@ -154,6 +155,8 @@ return static function (Router $r): void {
     $r->post('/v1/merchant/voice-messages/{id}/listened', [StallController::class, 'markListened'], $merchant);
     $r->delete('/v1/merchant/voice-messages/{id}', [StallController::class, 'deleteVoiceMessage'], $merchant);
     $r->get('/v1/merchant/today', [TodayController::class, 'today'], $merchant);
+    $r->get('/v1/merchant/orders', [OrdersController::class, 'index'], $merchant);
+    $r->get('/v1/merchant/orders/{id}', [OrdersController::class, 'show'], $merchant);
     $r->post('/v1/merchant/orders/{id}/ready', [TodayController::class, 'ready'], $merchant);
     $r->post('/v1/merchant/relocation/broadcast', [ClientsController::class, 'relocation'], $merchant);
     $r->post('/v1/merchant/arrivals', [ClientsController::class, 'arrival'], $merchant);
@@ -172,6 +175,10 @@ return static function (Router $r): void {
     $r->get('/v1/merchant/money', [MoneyController::class, 'money'], $merchant);
     $r->post('/v1/merchant/subscription/pay', [MoneyController::class, 'paySubscription'], $merchant);
     $r->post('/v1/merchant/subscription/verify', [MoneyController::class, 'verifySubscription'], $merchant);
+    $r->post('/v1/merchant/subscription/cancel', [MoneyController::class, 'cancelSubscription'], $merchant);
+    $r->post('/v1/merchant/subscription/resume', [MoneyController::class, 'resumeSubscription'], $merchant);
+    $r->post('/v1/merchant/subscriptions/{id}/receipt', [MoneyController::class, 'receiptLink'], $merchant);
+    $r->get('/v1/merchant/subscription-receipt', [MoneyController::class, 'receipt']);
     $r->post('/v1/merchant/credit-requests', [MoneyController::class, 'requestCredit'], $merchant);
     $r->post('/v1/merchant/credit-offer', [MoneyController::class, 'answerCreditOffer'], $merchant);
     $r->put('/v1/merchant/data-sharing', [MoneyController::class, 'dataSharing'], $merchant);

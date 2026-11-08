@@ -41,12 +41,18 @@ final class MoneyController
             [$stall['id']],
         );
         $payouts = Database::all('SELECT * FROM payouts WHERE stall_id = ? ORDER BY id DESC LIMIT 20', [$stall['id']]);
+        // Versé depuis le 1er du mois (heure du Bénin) : le chiffre « déjà versé » repart chaque mois
+        $monthStart = Clock::localDateStart(substr(Clock::localDate(), 0, 8) . "01");
+        $paidMonth = (int) Database::value("SELECT COALESCE(SUM(amount), 0) FROM payouts WHERE stall_id = ? AND status IN ('paid','simulated') AND created_at >= ?", [$stall['id'], $monthStart]);
+        $payoutsCount = (int) Database::value("SELECT COUNT(*) FROM payouts WHERE stall_id = ?", [$stall['id']]);
 
         Response::ok([
             // Payé par le client, gardé par Axi jusqu'à la réception
             'pending_amount' => (int) $sums['held'],
             'released_amount' => (int) $sums['released'],
             'paid_out_amount' => (int) $sums['paid_out'],
+            'paid_out_month' => $paidMonth,
+            'payouts_count' => $payoutsCount,
             'commission_rate_pct' => Settings::int('commission_rate'),
             'subscription' => Subscription::present($stall),
             'supplier_offer' => $this->supplierOffer($stall),
@@ -145,6 +151,89 @@ final class MoneyController
         Escrow::ensureInitiated((int) $payment['id']);
         Escrow::refresh((int) $payment['id'], 'merchant', $req->userId(), is_scalar($tx) && $payment['provider'] === 'kkiapay' ? (string) $tx : null);
         Response::ok($this->presentPayment((int) $payment['id']) + ['subscription' => Subscription::present(Merchant::stall($req))]);
+    }
+
+    /**
+     * Résilier : l'abonnement reste actif jusqu'à la fin de la période payée, puis s'arrête.
+     * Pas de remboursement, plus de rappel de renouvellement. Payer de nouveau annule la résiliation.
+     */
+    public function cancelSubscription(Request $req): never
+    {
+        $stall = Merchant::stall($req);
+        $current = Subscription::current((int) $stall['id']) ?? throw new HttpException(409, 'NO_SUBSCRIPTION', 'Vous n\'avez pas d\'abonnement en cours.');
+        if ($current['paid_by'] !== 'merchant') {
+            throw new HttpException(409, 'NOT_CANCELLABLE', 'Cet abonnement est inclus dans votre place de marché : il ne peut pas être résilié ici.');
+        }
+        Database::run("UPDATE subscriptions SET cancelled_at = ? WHERE stall_id = ? AND status = 'active' AND ends_on >= ? AND cancelled_at IS NULL", [Clock::now(), $stall['id'], Clock::localDate()]);
+        Response::ok(['subscription' => Subscription::present(Merchant::stall($req))]);
+    }
+
+    /** Annuler la résiliation tant que l'abonnement court encore */
+    public function resumeSubscription(Request $req): never
+    {
+        $stall = Merchant::stall($req);
+        Subscription::current((int) $stall['id']) ?? throw new HttpException(409, 'NO_SUBSCRIPTION', 'Votre abonnement est terminé : abonnez-vous de nouveau.');
+        Database::run("UPDATE subscriptions SET cancelled_at = NULL WHERE stall_id = ? AND status = 'active'", [$stall['id']]);
+        Response::ok(['subscription' => Subscription::present(Merchant::stall($req))]);
+    }
+
+    /** Lien (10 minutes) vers le reçu d'une période payée par le commerçant */
+    public function receiptLink(Request $req): never
+    {
+        $stall = Merchant::stall($req);
+        $id = $req->id('sub', 'NOT_FOUND', 'Reçu introuvable.');
+        Database::value("SELECT id FROM subscriptions WHERE id = ? AND stall_id = ? AND status = 'active' AND paid_by = 'merchant'", [$id, $stall['id']])
+            ?? throw new HttpException(404, 'NOT_FOUND', 'Reçu introuvable.');
+        Response::ok(['url' => \Axi\Services\SignedUrl::make('/v1/merchant/subscription-receipt', ['s' => $id], 600)]);
+    }
+
+    /** Reçu imprimable (Imprimer / Enregistrer en PDF depuis le navigateur) */
+    public function receipt(Request $req): never
+    {
+        $params = \Axi\Services\SignedUrl::verify('/v1/merchant/subscription-receipt', $req->queryAll());
+        $s = Database::one(
+            "SELECT s.*, st.name AS stall_name, u.name AS owner_name, u.email, p.paid_at, p.operator, p.phone AS pay_phone, p.reference, p.provider_ref
+             FROM subscriptions s JOIN stalls st ON st.id = s.stall_id JOIN users u ON u.id = st.user_id
+             LEFT JOIN payments p ON p.subscription_id = s.id AND p.status = 'paid'
+             WHERE s.id = ? AND s.status = 'active' AND s.paid_by = 'merchant'",
+            [(int) ($params['s'] ?? 0)],
+        ) ?? throw new HttpException(404, 'NOT_FOUND', 'Reçu introuvable.');
+        $e = static fn (?string $v): string => htmlspecialchars((string) $v, ENT_QUOTES, 'UTF-8');
+        $date = static fn (string $d): string => date('d/m/Y', strtotime($d));
+        $money = static fn (int $n): string => number_format($n, 0, ',', ' ') . ' FCFA';
+        $paidAt = $s['paid_at'] ?? $s['created_at'];
+        $paidLocal = (new \DateTimeImmutable($paidAt, new \DateTimeZone('UTC')))->setTimezone(new \DateTimeZone((string) \Axi\Core\Config::get('timezone')));
+        $operator = ['mtn' => 'MTN MoMo', 'moov' => 'Moov Money', 'celtiis' => 'Celtiis Cash'][$s['operator'] ?? ''] ?? 'Mobile Money';
+        $phone = $s['pay_phone'] !== null ? substr($s['pay_phone'], 0, -4) . '••••' : '';
+        $number = 'AXI-ABO-' . str_pad((string) $s['id'], 6, '0', STR_PAD_LEFT);
+        $rows = [
+            ['Commerçant', $s['owner_name']],
+            ['Étal', $s['stall_name']],
+            ['Formule', ($s['plan'] === 'wholesale' ? 'Formule Gros' : 'Formule Étal') . ' · ' . ($s['period'] === 'year' ? '1 an' : '1 mois')],
+            ['Période', 'du ' . $date($s['starts_on']) . ' au ' . $date($s['ends_on'])],
+            ['Payé le', $paidLocal->format('d/m/Y à H:i')],
+            ['Moyen de paiement', trim($operator . ' ' . $phone)],
+            ['Référence', $s['reference'] ?? $number],
+        ];
+        $lines = implode('', array_map(static fn (array $r): string => '<tr><th>' . $e($r[0]) . '</th><td>' . $e($r[1]) . '</td></tr>', $rows));
+        header('Content-Type: text/html; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo '<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            . '<title>Reçu ' . $e($number) . '</title><style>'
+            . 'body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f5f5f4;color:#1c1917;margin:0;padding:16px}'
+            . '.r{max-width:560px;margin:0 auto;background:#fff;border-radius:16px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,.08)}'
+            . 'h1{font-size:22px;margin:0}.muted{color:#78716c;font-size:14px}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:20px}'
+            . '.paid{background:#dcfce7;color:#166534;font-weight:700;border-radius:999px;padding:4px 12px;font-size:13px;white-space:nowrap}'
+            . 'table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px 0;border-bottom:1px solid #e7e5e4;font-size:15px;vertical-align:top}th{color:#78716c;font-weight:500;width:42%}'
+            . '.total{display:flex;justify-content:space-between;font-size:20px;font-weight:800;margin-top:18px}'
+            . 'button{margin-top:24px;width:100%;padding:14px;border:0;border-radius:12px;background:#1c1917;color:#fff;font-size:16px;font-weight:700}'
+            . '@media print{body{background:#fff;padding:0}.r{box-shadow:none}button{display:none}}</style></head><body><div class="r">'
+            . '<div class="top"><div><h1>Axi · Reçu d\'abonnement</h1><div class="muted">N° ' . $e($number) . '</div></div><span class="paid">Payé</span></div>'
+            . '<table>' . $lines . '</table>'
+            . '<div class="total"><span>Montant payé</span><span>' . $e($money((int) $s['amount'])) . '</span></div>'
+            . '<p class="muted">Abonnement Axi pour commerçants. Ce reçu atteste du paiement ; il n\'est pas une facture fiscale.</p>'
+            . '<button onclick="window.print()">Imprimer ou enregistrer en PDF</button></div></body></html>';
+        exit;
     }
 
     /** Refusé tant que le partage d'historique avec l'IMF n'est pas accepté */

@@ -15,6 +15,8 @@ use Axi\Support\Merchant;
 /** « Ma journée » */
 final class TodayController
 {
+    /** Commandes montrées sur « Ma journée » ; les autres sont dans « Mes commandes » */
+    private const SHOWN = 3;
     private const STATUS_LABELS = ['to_prepare' => 'À préparer', 'ready' => 'Prête', 'picked_up' => 'Remise au coursier'];
 
     public function today(Request $req): never
@@ -28,13 +30,15 @@ final class TodayController
             [$stall['id'], $dayStart],
         );
         $rows = Database::all(
-            'SELECT os.id AS part_id, os.status, o.id AS order_id, o.reception_mode, o.reception_detail, o.payment_phone,
+            // Seulement ce qu'il reste à faire, les plus anciennes d'abord : une commande quitte la liste dès qu'elle
+            // est remise au coursier. Le reste est dans « Mes commandes ».
+            'SELECT os.id AS part_id, os.status, os.items_total, o.id AS order_id, o.paid_at, o.reception_mode, o.reception_detail, o.payment_phone,
                     u.name AS customer_name, p.name AS axi_point_name
              FROM order_stalls os JOIN orders o ON o.id = os.order_id JOIN users u ON u.id = o.client_id
              LEFT JOIN axi_points p ON p.id = o.axi_point_id
-             WHERE os.stall_id = ? AND (os.status IN (\'to_prepare\', \'ready\') OR (os.status = \'picked_up\' AND os.updated_at >= ?))
-             ORDER BY os.status = \'to_prepare\' DESC, o.id DESC LIMIT 50',
-            [$stall['id'], $dayStart],
+             WHERE os.stall_id = ? AND os.status IN (\'to_prepare\', \'ready\')
+             ORDER BY os.status = \'to_prepare\' DESC, o.paid_at ASC, o.id ASC LIMIT ' . self::SHOWN,
+            [$stall['id']],
         );
 
         $orders = [];
@@ -47,8 +51,19 @@ final class TodayController
                 'summary' => implode(', ', array_map(static fn (array $i): string => $i['quantity'] . ' × ' . $i['name'], $items)) . ' · ' . self::receptionLabel($row),
                 'status' => $row['status'],
                 'status_label' => self::STATUS_LABELS[$row['status']],
+                'amount' => (int) $row['items_total'],
+                'created_at' => Clock::iso($row['paid_at']),
             ];
         }
+
+        $counts = ['to_prepare' => 0, 'ready' => 0];
+        foreach (Database::all("SELECT status, COUNT(*) AS n FROM order_stalls WHERE stall_id = ? AND status IN ('to_prepare','ready') GROUP BY status", [$stall['id']]) as $c) {
+            $counts[$c['status']] = (int) $c['n'];
+        }
+        $ordersToday = (int) Database::value(
+            "SELECT COUNT(*) FROM order_stalls os JOIN orders o ON o.id = os.order_id WHERE os.stall_id = ? AND os.status NOT IN ('awaiting_payment', 'cancelled') AND o.paid_at >= ?",
+            [$stall['id'], $dayStart],
+        );
 
         $subscription = Database::one('SELECT ends_on FROM subscriptions WHERE stall_id = ? AND status = \'active\' ORDER BY ends_on DESC LIMIT 1', [$stall['id']]);
         $active = $subscription !== null && $subscription['ends_on'] >= Clock::localDate();
@@ -57,12 +72,16 @@ final class TodayController
             'greeting_name' => $stall['owner_name'],
             'stall_open' => (bool) $stall['is_open'],
             'sales_today' => $sales,
-            'orders_to_prepare' => count(array_filter($orders, static fn (array $o): bool => $o['status'] === 'to_prepare')),
+            'orders_to_prepare' => $counts['to_prepare'],
+            // À préparer + prêtes : « Voir toutes mes commandes (N) » quand la liste du jour n'en montre qu'une partie
+            'orders_open' => $counts['to_prepare'] + $counts['ready'],
+            // Commandes payées aujourd'hui (le chiffre des ventes du jour)
+            'orders_today' => $ordersToday,
             'connection' => ['active' => $active, 'included_until' => $subscription['ends_on'] ?? null],
             'relocation' => $this->relocation($stall),
             'ads' => \Axi\Services\Ads::online('merchants'),
             'orders' => $orders,
-        ], 200, 60);
+        ]);
     }
 
     /** « Prêt pour le coursier » */

@@ -1413,6 +1413,23 @@ ALTER TABLE messages MODIFY kind ENUM('text','photo','voice','video','system') N
 INSERT INTO schema_migrations (file, applied_at) VALUES ('027_avis_discussion.sql', UTC_TIMESTAMP());
 
 -- -----------------------------------------------------------------------------
+-- 028_annonces_resiliation.sql
+-- -----------------------------------------------------------------------------
+-- =============================================================================
+-- 028 : annonces groupées dans les discussions, résiliation d'abonnement, canal des envois groupés.
+--   messages.is_announcement : message envoyé à plusieurs clients à la fois (badge « Annonce » dans la discussion).
+--   subscriptions.cancelled_at : résilié par le commerçant ; l'abonnement reste actif jusqu'à ends_on,
+--     sans rappel de renouvellement ni remboursement.
+--   broadcasts.channel : envoi dans Axi ou préparé pour WhatsApp.
+-- Base déjà installée : importer CE fichier seul (phpMyAdmin > Importer), ou php database/migrate.php.
+-- =============================================================================
+ALTER TABLE messages ADD COLUMN is_announcement TINYINT(1) NOT NULL DEFAULT 0 AFTER kind;
+ALTER TABLE subscriptions ADD COLUMN cancelled_at DATETIME DEFAULT NULL AFTER ends_on;
+ALTER TABLE broadcasts ADD COLUMN channel ENUM('axi','whatsapp') NOT NULL DEFAULT 'axi' AFTER segment;
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('028_annonces_resiliation.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
 -- Comptes de test (un par rôle, et un par type de partenaire). Changer les mots de passe en production.
 -- -----------------------------------------------------------------------------
 INSERT INTO organizations (id, name, type) VALUES (2, 'ANaGeM', 'anagem'), (3, 'Annonceur de test', 'advertiser'), (4, 'IMF de test', 'mfi');

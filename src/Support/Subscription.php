@@ -139,6 +139,50 @@ final class Subscription
                 'text' => $active ? null : sprintf(self::LIMITS_TEXT, $limit),
             ],
             'benefits' => self::BENEFITS,
+            // Gestion de l'abonnement en cours : dates, résiliation, reçus
+            'starts_on' => $active ? self::chainStart((int) $stall['id'], $current) : null,
+            'cancelled' => $active && self::isCancelled((int) $stall['id']),
+            'can_cancel' => $active && ($current['paid_by'] ?? '') === 'merchant',
+            'history' => self::history((int) $stall['id']),
         ];
+    }
+
+    /** Résilié : la dernière période payée porte la date de résiliation */
+    public static function isCancelled(int $stallId): bool
+    {
+        return Database::value("SELECT cancelled_at FROM subscriptions WHERE stall_id = ? AND status = 'active' ORDER BY ends_on DESC LIMIT 1", [$stallId]) !== null;
+    }
+
+    /** Début de la période en cours (périodes payées à la suite comprises) */
+    private static function chainStart(int $stallId, array $current): string
+    {
+        $start = $current['starts_on'];
+        foreach (Database::all("SELECT starts_on, ends_on FROM subscriptions WHERE stall_id = ? AND status = 'active' AND starts_on <= ? ORDER BY ends_on DESC", [$stallId, $start]) as $s) {
+            if (date('Y-m-d', strtotime($s['ends_on'] . ' +1 day')) >= $start && $s['starts_on'] < $start) {
+                $start = $s['starts_on'];
+            }
+        }
+        return $start;
+    }
+
+    /** Périodes payées (les plus récentes d'abord), chacune avec son reçu */
+    private static function history(int $stallId): array
+    {
+        $rows = Database::all(
+            "SELECT s.*, p.paid_at, p.operator, p.reference FROM subscriptions s LEFT JOIN payments p ON p.subscription_id = s.id AND p.status = 'paid'
+             WHERE s.stall_id = ? AND s.status = 'active' ORDER BY s.starts_on DESC, s.id DESC LIMIT 12",
+            [$stallId],
+        );
+        return array_map(static fn (array $s): array => [
+            'id' => \Axi\Core\Ids::encode('sub', $s['id']),
+            'period' => $s['period'],
+            'period_label' => $s['period'] === 'year' ? '1 an' : '1 mois',
+            'amount' => (int) $s['amount'],
+            'starts_on' => $s['starts_on'],
+            'ends_on' => $s['ends_on'],
+            'paid_at' => Clock::iso($s['paid_at'] ?? $s['created_at']),
+            'paid_by' => $s['paid_by'],
+            'receipt' => $s['paid_by'] === 'merchant',
+        ], $rows);
     }
 }

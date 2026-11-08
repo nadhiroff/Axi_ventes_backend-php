@@ -336,6 +336,8 @@ final class Escrow
                 $start = $last !== null && $last >= Clock::localDate() ? date('Y-m-d', strtotime($last . ' +1 day')) : Clock::localDate();
                 $days = $sub['period'] === 'year' ? 365 : 30;
                 Database::run('UPDATE subscriptions SET status = \'active\', starts_on = ?, ends_on = ? WHERE id = ?', [$start, date('Y-m-d', strtotime($start . ' +' . ($days - 1) . ' days')), $sub['id']]);
+                // Payer de nouveau annule une résiliation
+                Database::run("UPDATE subscriptions SET cancelled_at = NULL WHERE stall_id = ? AND status = 'active'", [$sub['stall_id']]);
                 // Abonné : les produits masqués par la limite gratuite reviennent en vente
                 \Axi\Support\Subscription::resume((int) $sub['stall_id']);
                 return true;

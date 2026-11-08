@@ -117,7 +117,10 @@ final class Nightly
     {
         $rows = Database::all(
             "SELECT s.stall_id, MAX(s.ends_on) AS ends_on, st.user_id FROM subscriptions s JOIN stalls st ON st.id = s.stall_id
-             WHERE s.status = 'active' AND s.paid_by = 'merchant' GROUP BY s.stall_id, st.user_id HAVING ends_on BETWEEN ? AND ?",
+             WHERE s.status = 'active' AND s.paid_by = 'merchant'
+               -- Résilié par le commerçant : pas de rappel de renouvellement
+               AND NOT EXISTS (SELECT 1 FROM subscriptions c WHERE c.stall_id = s.stall_id AND c.status = 'active' AND c.cancelled_at IS NOT NULL)
+             GROUP BY s.stall_id, st.user_id HAVING ends_on BETWEEN ? AND ?",
             [Clock::localDate(), date('Y-m-d', strtotime(Clock::localDate() . ' +3 days'))],
         );
         $n = 0;

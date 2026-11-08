@@ -433,7 +433,7 @@ final class MessagesController
             'unread_count' => $unread,
             'last_message' => $last === null ? null : [
                 'kind' => $last['kind'],
-                'preview' => $last['deleted_at'] !== null ? '🚫 Message supprimé' : match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', 'video' => '🎥 Vidéo', 'system' => '🕒 ' . self::systemText($last, $me, $c['stall_name'] ?? null), default => mb_substr((string) $last['body'], 0, 80) },
+                'preview' => $last['deleted_at'] !== null ? '🚫 Message supprimé' : match ($last['kind']) { 'photo' => '📷 Photo', 'voice' => '🎤 Message vocal', 'video' => '🎥 Vidéo', 'system' => '🕒 ' . self::systemText($last, $me, $c['stall_name'] ?? null), default => (($last['is_announcement'] ?? 0) ? '📢 ' : '') . mb_substr((string) $last['body'], 0, 80) },
                 // Un avis n'a pas de coches ni d'auteur affiché (« Vous : »)
                 'mine' => $last['kind'] !== 'system' && (int) $last['sender_id'] === $me,
                 // Coches visibles dans la liste : ✓ envoyé, ✓✓ reçu, ✓✓ bleu vu (mes messages seulement)
@@ -487,7 +487,7 @@ final class MessagesController
             $stallName = (string) Database::value('SELECT name FROM stalls WHERE id = ?', [$c['stall_id']]);
             return [
                 'id' => Ids::encode('msg', $m['id']), 'mine' => $mine, 'status' => null, 'edited' => false, 'reply' => null, 'deleted' => false,
-                'kind' => 'system', 'body' => self::systemText($m, $me, $stallName), 'image' => null, 'audio_url' => null, 'video_url' => null,
+                'kind' => 'system', 'announcement' => false, 'body' => self::systemText($m, $me, $stallName), 'image' => null, 'audio_url' => null, 'video_url' => null,
                 'created_at' => Clock::iso($m['created_at']), 'expires_at' => null,
             ];
         }
@@ -507,6 +507,8 @@ final class MessagesController
             'reply' => $this->reply($m['reply_to_id'] === null ? null : (int) $m['reply_to_id'], $me),
             'deleted' => $deleted,
             'kind' => $m['kind'],
+            // Message groupé du commerçant (« Message à mes clients ») : petit badge « Annonce » dans la bulle
+            'announcement' => (bool) ($m['is_announcement'] ?? false),
             'body' => $m['body'],
             'image' => $deleted ? null : ($m['kind'] === 'photo' ? Stalls::image($m['file_path'], $m['file_width'] === null ? null : (int) $m['file_width'], $m['file_height'] === null ? null : (int) $m['file_height']) : null),
             'audio_url' => !$deleted && $m['kind'] === 'voice' ? SignedUrl::make('/v1/media/audio', ['p' => $m['file_path']], 86400) : null,
