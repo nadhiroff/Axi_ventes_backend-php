@@ -16,3 +16,6 @@
 # Dépendances versionnées : l'hébergement n'a pas de SSH pour lancer composer install
 !/vendor/
 /storage/private/
+
+# Configuration de production préparée sur le PC, à déposer par FTP dans config/ : jamais versionnée
+/deploy/production/
