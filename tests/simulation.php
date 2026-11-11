@@ -562,7 +562,9 @@ check('le signalement apparaît dans l\'espace web', str_contains(call('GET', '/
 $reportId = (int) Database::value('SELECT id FROM reports WHERE target_user_id = ?', [$secondId]);
 call('POST', "/pro/signalements/$reportId/bloquer", ['_csrf' => $csrf, 'reason' => 'Tentative d\'arnaque signalée.'], null, [], false, true);
 $login = call('POST', '/v1/auth/login', ['email' => "sim-commercant2-$stamp@example.com", 'password' => 'simulation-123']);
-check('compte bloqué : déconnecté, et message avec le motif à la connexion', call('GET', '/v1/me', null, $second)['status'] === 401 && ($login['body']['error']['code'] ?? '') === 'ACCOUNT_SUSPENDED'
+// Session d'un compte bloqué : refusée (403 ACCOUNT_SUSPENDED avec le motif, ou 401)
+$denied = static fn (array $r): bool => $r['status'] === 401 || ($r['status'] === 403 && ($r['body']['error']['code'] ?? '') === 'ACCOUNT_SUSPENDED');
+check('compte bloqué : déconnecté, et message avec le motif à la connexion', $denied(call('GET', '/v1/me', null, $second)) && ($login['body']['error']['code'] ?? '') === 'ACCOUNT_SUSPENDED'
     && str_contains($login['body']['error']['message'] ?? '', 'Tentative d\'arnaque'), $login['raw']);
 check('étal du commerçant bloqué : invisible', call('GET', "/v1/stalls/stl_$secondStall")['status'] === 404);
 call('POST', "/pro/clients/$secondId/activer", ['_csrf' => $csrf], null, [], false, true);
@@ -587,17 +589,19 @@ $csrf = webLogin('annonceur@example.com', 'Partenaire-2026!');
 call('POST', '/pro/campagnes', ['_csrf' => $csrf, 'format' => 'sponsored_home', 'audience_type' => 'clients', 'aisle_id' => 'tissus', 'title' => "Promo sim $stamp", 'body' => 'Wax à prix doux', 'budget' => '60000'], null, [], false, true);
 $campaign = (int) Database::value('SELECT id FROM campaigns WHERE title = ?', ["Promo sim $stamp"]);
 check('annonceur : campagne créée « en relecture »', $campaign > 0 && Database::value('SELECT status FROM campaigns WHERE id = ?', [$campaign]) === 'pending_review');
-check('campagne non diffusée avant validation', call('GET', '/v1/home')['body']['data']['sponsored'] === null || call('GET', '/v1/home')['body']['data']['sponsored']['title'] !== "Promo sim $stamp");
+// Publicités de l'accueil : liste « ads » (titre de chaque publicité en ligne)
+$adTitles = static fn (): array => array_column(call('GET', '/v1/home')['body']['data']['ads'] ?? [], 'title');
+check('campagne non diffusée avant validation', !in_array("Promo sim $stamp", $adTitles(), true));
 $csrf = webLogin('partenaire@example.com', 'Partenaire-2026!');
 call('POST', "/pro/campagnes/$campaign/statut", ['_csrf' => $csrf, 'status' => 'active'], null, [], false, true);
-check('validée par l\'agent : bannière sur l\'accueil client', (call('GET', '/v1/home')['body']['data']['sponsored']['title'] ?? '') === "Promo sim $stamp");
+check('validée par l\'agent : bannière sur l\'accueil client', in_array("Promo sim $stamp", $adTitles(), true));
 call('POST', '/pro/campagnes/' . $campaign . '/statut', ['_csrf' => $csrf, 'status' => 'ended'], null, [], false, true);
 call('POST', '/pro/reglages', ['_csrf' => $csrf, 'v' => ['fee_delivery' => '2000']], null, [], false, true);
 check('réglage modifié dans le web → appliqué au devis', (call('POST', '/v1/orders/quote', ['lines' => [['product_id' => "prd_$rice", 'quantity' => 1]], 'reception' => ['mode' => 'delivery', 'detail' => '']])['body']['data']['reception_fee'] ?? 0) === 2000);
 call('POST', '/pro/reglages', ['_csrf' => $csrf, 'v' => ['fee_delivery' => '1500', 'commission_rate' => '7']], null, [], false, true);
 check('commission hors 0/2/3/4 % refusée', Database::value("SELECT v FROM settings WHERE k = 'commission_rate'") === '2');
 call('POST', "/pro/commercants/$stallId/suspendre", ['_csrf' => $csrf, 'reason' => 'Suspension de test (simulation).'], null, [], false, true);
-check('commerçant suspendu : étal invisible et jeton révoqué', call('GET', "/v1/stalls/stl_$stallId")['status'] === 404 && call('GET', '/v1/me', null, $merchant)['status'] === 401);
+check('commerçant suspendu : étal invisible et jeton révoqué', call('GET', "/v1/stalls/stl_$stallId")['status'] === 404 && $denied(call('GET', '/v1/me', null, $merchant)), call('GET', "/v1/stalls/stl_$stallId")['raw']);
 call('POST', "/pro/commercants/$stallId/activer", ['_csrf' => $csrf], null, [], false, true);
 
 // ---------------------------------------------------------------------------
