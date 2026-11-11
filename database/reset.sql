@@ -1430,6 +1430,15 @@ ALTER TABLE broadcasts ADD COLUMN channel ENUM('axi','whatsapp') NOT NULL DEFAUL
 INSERT INTO schema_migrations (file, applied_at) VALUES ('028_annonces_resiliation.sql', UTC_TIMESTAMP());
 
 -- -----------------------------------------------------------------------------
+-- 029_email_support.sql
+-- -----------------------------------------------------------------------------
+-- Adresse de contact en cas de problème (compte bloqué, aide) : support@rgz.bj
+-- Modifiable ensuite par un agent Axi dans l'espace web (Réglages).
+UPDATE settings SET v = 'support@rgz.bj', label = 'Email de contact en cas de problème (comptes bloqués, aide)' WHERE k = 'support_email';
+
+INSERT INTO schema_migrations (file, applied_at) VALUES ('029_email_support.sql', UTC_TIMESTAMP());
+
+-- -----------------------------------------------------------------------------
 -- Comptes de test (un par rôle, et un par type de partenaire). Changer les mots de passe en production.
 -- -----------------------------------------------------------------------------
 INSERT INTO organizations (id, name, type) VALUES (2, 'ANaGeM', 'anagem'), (3, 'Annonceur de test', 'advertiser'), (4, 'IMF de test', 'mfi');
